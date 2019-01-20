@@ -305,7 +305,23 @@ def preplot_rec(x, epoch):
     fname = '%s/gen/pre_rec_%d.png' % (opt.log_dir, epoch) 
     utils.save_tensors_image(fname, to_plot)
 
-    
+# --------- swap loss function -------------------
+def swap_cp(x):
+    """
+    Return mse after swapping content and pose
+    """
+    swap_mse = 0
+    vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past, opt.n_past+opt.n_future)]
+    _, skip = encoder_c(x[opt.n_past + opt.n_future - 1])
+    for i in range(opt.n_future):
+        vec_c_global = content_lstm(vec_c_seq[i])
+        
+    for i in range(opt.n_past):
+        vec_p, _ = encoder_p(x[i])
+        x_pred = decoder([torch.cat([vec_c_global, vec_p], 1), skip])
+        swap_mse += mse_criterion(x_pred, x[i])
+    return swap_mse
+
 # --------- pre-training funtions ------------------------------------
 def pretrain(x):
     # zero_grad and initialize the hidden state.
@@ -318,6 +334,7 @@ def pretrain(x):
     # log variable
     mse = 0
     preserve_loss = 0
+    swap_mse = 0
     
     # generate content vector in each time step and produce global content vector
     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
@@ -341,7 +358,20 @@ def pretrain(x):
         pred_vec_c_global = content_lstm(pred_vec_c_seq[i])
     preserve_loss = mse_criterion(pred_vec_c_global, vec_c_global)
     
-    loss = mse + 0.1*preserve_loss
+    # --------------------- Swap content & pose --------------------
+    vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past, opt.n_past+opt.n_future)]
+    _, skip = encoder_c(x[opt.n_past + opt.n_future - 1])
+    for i in range(opt.n_future):
+        vec_c_global = content_lstm(vec_c_seq[i])
+    
+    for i in range(opt.n_past):
+        vec_p, _ = encoder_p(x[i])
+
+        x_pred = decoder([torch.cat([vec_c_global, vec_p], 1), skip])
+        
+        swap_mse += mse_criterion(x_pred, x[i])
+    
+    loss = mse + 0.1*preserve_loss + swap_mse
     loss.backward()
     
     content_lstm_optimizer.step()
@@ -349,7 +379,7 @@ def pretrain(x):
     encoder_p_optimizer.step()
     decoder_optimizer.step()
     
-    return mse.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future)
+    return mse.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past)
 
 # --------- training funtions ------------------------------------
 def train(x):
@@ -368,6 +398,7 @@ def train(x):
     mse = 0
     kld = 0
     preserve_loss = 0
+    swap_mse = 0
     
     # generate content vector in each time step and produce global content vector
     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
@@ -394,7 +425,10 @@ def train(x):
         pred_vec_c_global = content_lstm(pred_vec_c_seq[i])
     preserve_loss = mse_criterion(pred_vec_c_global, vec_c_global)
     
-    loss = mse + kld*opt.beta + 0.1*preserve_loss
+    # Swapping content and pose loss
+    swap_mse = swap_cp(x)
+    
+    loss = mse + kld*opt.beta + 0.1*preserve_loss + swap_mse
 #     loss = mse + kld*opt.beta
     loss.backward()
 
@@ -406,11 +440,11 @@ def train(x):
     decoder_optimizer.step()
 
 #     return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future)
-    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future)
+    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past)
 
 
 # --------- Pre-train loop -----------------------------------
-# Train the model without temporary on pose encoder
+# Train the model without temporary on pose encoder & variation
 if opt.pretrain:
     for epoch in tqdm(range(opt.pre_niter), desc='[PRE]EPOCH'):
         content_lstm.train()
@@ -420,14 +454,16 @@ if opt.pretrain:
         
         epoch_mse = 0
         epoch_preserve = 0
+        epoch_swap_mse = 0
         
         for i in tqdm(range(opt.epoch_size), desc='[PRE]BATCH'):
             x = next(training_batch_generator)
-            mse, preserve = pretrain(x)
+            mse, preserve, swap_mse = pretrain(x)
             
             epoch_mse += mse
             epoch_preserve += preserve
-        print('[PRE][%02d] mse loss: %.5f | preserve: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+            epoch_swap_mse += swap_mse
+        print('[PRE][%02d] mse loss: %.5f | preserve: %.5f | swap mse: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch_swap_mse/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
     
         # Make visualization
         content_lstm.eval()
@@ -438,6 +474,15 @@ if opt.pretrain:
         x = next(testing_batch_generator)
         with torch.no_grad():
             preplot_rec(x, epoch)
+            
+        if epoch % 10 == 9:
+            torch.save({
+                'encoder_p': encoder_p,
+                'encoder_c': encoder_c,
+                'decoder': decoder,
+                'content_lstm': content_lstm,
+                'opt': opt},
+                '%s/pre_model.pth' % opt.log_dir)
     
 
 # --------- training loop ------------------------------------
@@ -452,20 +497,24 @@ for epoch in tqdm(range(opt.niter), desc='EPOCH'):
     epoch_mse = 0
     epoch_kld = 0
     epoch_preserve = 0
+    epoch_pose_recon = 0
+    epoch_swap_mse = 0
     
     for i in tqdm(range(opt.epoch_size), desc='BATCH'):
         x = next(training_batch_generator)
 
-        # train frame_predictor 
-        mse, kld, preserve = train(x)
+        # train frame_predictor
+        mse, kld, preserve, swap_mse = train(x)
 #         mse, kld = train(x)
         epoch_mse += mse
         epoch_kld += kld
         epoch_preserve += preserve
+        epoch_swap_mse += swap_mse
 
 
 #     print('[%02d] mse loss: %.5f | kld loss: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
-    print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+#     print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+    print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f | swap mse: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch_swap_mse/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
 
     # plot some stuff
     frame_predictor.eval()
