@@ -41,6 +41,7 @@ parser.add_argument('--data_threads', type=int, default=5, help='number of data 
 parser.add_argument('--num_digits', type=int, default=2, help='number of digits for moving mnist')
 parser.add_argument('--last_frame_skip', action='store_true', help='if true, skip connections go between frame t and frame t+t rather than last ground truth frame')
 parser.add_argument('--pretrain', action='store_true', help='if true, train model without teporary first')
+parser.add_argument('--clip_value', type=float, default=0.01, help='lower and upper clip value for disc. weights')
 
 
 opt = parser.parse_args()
@@ -84,6 +85,7 @@ else:
     raise ValueError('Unknown optimizer: %s' % opt.optimizer)
 
 import models.lstm as lstm_models
+import models.discriminator as D
 if opt.model_dir != '':
     frame_predictor = saved_model['frame_predictor']
     content_lstm = saved_model['content_lstm']
@@ -118,10 +120,12 @@ else:
     encoder_p = model.encoder(opt.z_dim, opt.channels)
     encoder_c = model.encoder(opt.g_dim, opt.channels)
     decoder = model.decoder(opt.g_dim + opt.z_dim, opt.channels)
+    discriminator = D.discriminator(opt.z_dim)
     
     encoder_p.apply(utils.init_weights)
     encoder_c.apply(utils.init_weights)
     decoder.apply(utils.init_weights)
+    discriminator.apply(utils.init_weights)
 
 frame_predictor_optimizer = opt.optimizer(frame_predictor.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 content_lstm_optimizer = opt.optimizer(content_lstm.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
@@ -129,9 +133,11 @@ posterior_optimizer = opt.optimizer(posterior.parameters(), lr=opt.lr, betas=(op
 encoder_p_optimizer = opt.optimizer(encoder_p.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 encoder_c_optimizer = opt.optimizer(encoder_c.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 decoder_optimizer = opt.optimizer(decoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+discriminator_optimizer = opt.optimizer(discriminator.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
 # --------- loss functions ------------------------------------
 mse_criterion = nn.MSELoss()
+bce_criterion = nn.BCELoss()
 def kl_criterion(mu, logvar):
   # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
   KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
@@ -145,8 +151,10 @@ content_lstm.cuda()
 posterior.cuda()
 encoder_p.cuda()
 encoder_c.cuda()
+discriminator.cuda()
 decoder.cuda()
 mse_criterion.cuda()
+bce_criterion.cuda()
 
 # --------- load a dataset ------------------------------------
 train_data, test_data = utils.load_dataset(opt)
@@ -311,6 +319,11 @@ def swap_cp(x):
     Return mse after swapping content and pose
     """
     swap_mse = 0
+    
+    frame_predictor.hidden = frame_predictor.init_hidden()
+    content_lstm.hidden = content_lstm.init_hidden()
+    posterior.hidden = posterior.init_hidden()
+    
     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past, opt.n_past+opt.n_future)]
     _, skip = encoder_c(x[opt.n_past + opt.n_future - 1])
     for i in range(opt.n_future):
@@ -318,10 +331,47 @@ def swap_cp(x):
         
     for i in range(opt.n_past):
         vec_p, _ = encoder_p(x[i])
-        x_pred = decoder([torch.cat([vec_c_global, vec_p], 1), skip])
+        vec_p_global, _, _ = posterior(vec_p)
+        h_pred = frame_predictor(vec_p_global)
+        x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
         swap_mse += mse_criterion(x_pred, x[i])
     return swap_mse
 
+# --------- train discriminator --------------------------------------
+def train_D(x, y):
+    """
+    Training function for discriminator
+    """
+    discriminator.zero_grad()
+    
+    loss_d = 0
+    
+    vec_p_x = [encoder_p(x[i])[0].detach() for i in range(opt.n_past+opt.n_future)]
+    vec_p_y = [encoder_p(y[i])[0].detach() for i in range(opt.n_past+opt.n_future)]
+    target_1 = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(1)
+    target_0 = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0)
+    
+    for vec_x in vec_p_x:
+        for vec_y in vec_p_y:
+            loss_d += bce_criterion(discriminator([vec_x, vec_y]), target_0)
+            
+    for vec_x_1 in vec_p_x:
+        for vec_x_2 in vec_p_x:
+            loss_d += 0.5 * bce_criterion(discriminator([vec_x_1, vec_x_2]), target_1)
+            
+    for vec_y_1 in vec_p_y:
+        for vec_y_2 in vec_p_y:
+            loss_d += 0.5 * bce_criterion(discriminator([vec_y_1, vec_y_2]), target_1)
+        
+    loss_d.backward()
+    discriminator_optimizer.step()
+    
+    # Clip weights of discriminator
+    for p in discriminator.parameters():
+        p.data.clamp_(-opt.clip_value, opt.clip_value)
+        
+    return loss_d.data.cpu().numpy() / (2*(opt.n_past+opt.n_future)**2)
+    
 # --------- pre-training funtions ------------------------------------
 def pretrain(x):
     # zero_grad and initialize the hidden state.
@@ -399,6 +449,7 @@ def train(x):
     kld = 0
     preserve_loss = 0
     swap_mse = 0
+    adv_loss = 0
     
     # generate content vector in each time step and produce global content vector
     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
@@ -425,10 +476,16 @@ def train(x):
         pred_vec_c_global = content_lstm(pred_vec_c_seq[i])
     preserve_loss = mse_criterion(pred_vec_c_global, vec_c_global)
     
+    # Disc. loss
+    target_half = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.5)
+    vec_p_seq = [encoder_p(x[i])[0] for i in range(opt.n_past + opt.n_future)]
+    for i in range(1, opt.n_past+opt.n_future):
+        adv_loss += bce_criterion(discriminator([vec_p_seq[i-1], vec_p_seq[i]]), target_half)
+    
     # Swapping content and pose loss
     swap_mse = swap_cp(x)
     
-    loss = mse + kld*opt.beta + 0.1*preserve_loss + swap_mse
+    loss = mse + kld*opt.beta + 0.1*preserve_loss + swap_mse + adv_loss
 #     loss = mse + kld*opt.beta
     loss.backward()
 
@@ -440,7 +497,7 @@ def train(x):
     decoder_optimizer.step()
 
 #     return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future)
-    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past)
+    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
 
 
 # --------- Pre-train loop -----------------------------------
@@ -499,22 +556,29 @@ for epoch in tqdm(range(opt.niter), desc='EPOCH'):
     epoch_preserve = 0
     epoch_pose_recon = 0
     epoch_swap_mse = 0
+    epoch_loss_d = 0
+    epoch_adv_loss = 0
     
     for i in tqdm(range(opt.epoch_size), desc='BATCH'):
         x = next(training_batch_generator)
-
+        y = next(training_batch_generator)
+        
+        # train disc.
+        epoch_loss_d += train_D(x, y)
         # train frame_predictor
-        mse, kld, preserve, swap_mse = train(x)
+        mse, kld, preserve, swap_mse, adv_loss = train(x)
 #         mse, kld = train(x)
         epoch_mse += mse
         epoch_kld += kld
         epoch_preserve += preserve
         epoch_swap_mse += swap_mse
+        epoch_adv_loss += adv_loss
+        
 
 
 #     print('[%02d] mse loss: %.5f | kld loss: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
 #     print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
-    print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f | swap mse: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch_swap_mse/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+    print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f | swap mse: %.5f | loss D: %.5f | adv loss: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch_swap_mse/opt.epoch_size, epoch_loss_d/opt.epoch_size, epoch_adv_loss/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
 
     # plot some stuff
     frame_predictor.eval()
