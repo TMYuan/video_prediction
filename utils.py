@@ -175,6 +175,8 @@ def save_gif_with_text(filename, inputs, text, duration=0.25):
         img = image_tensor([draw_text_tensor(ti, texti) for ti, texti in zip(tensor, text)], padding=0)
         img = img.cpu()
         img = img.transpose(0,1).transpose(1,2).clamp(0,1).numpy()
+        img = img * 255
+        img = img.astype('uint8')
         images.append(img)
     imageio.mimsave(filename, images, duration=duration)
 

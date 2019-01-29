@@ -471,10 +471,18 @@ def train(x):
         pred_img_list.append(x_pred)
 
     # Content Preserve Loss
+    hidden_now = content_lstm.hidden
     pred_vec_c_seq = [encoder_c(pred)[0] for pred in pred_img_list]
+    
     for i in range(opt.n_future):
         pred_vec_c_global = content_lstm(pred_vec_c_seq[i])
-    preserve_loss = mse_criterion(pred_vec_c_global, vec_c_global)
+        preserve_loss += mse_criterion(pred_vec_c_global, vec_c_global)
+    
+    content_lstm.hidden = hidden_now
+    gt_vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past, opt.n_past + opt.n_future)]
+    for i in range(opt.n_future):
+        gt_vec_c_global = content_lstm(gt_vec_c_seq[i])
+        preserve_loss += mse_criterion(gt_vec_c_global, vec_c_global)
     
     # Disc. loss
     target_half = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.5)
@@ -497,7 +505,7 @@ def train(x):
     decoder_optimizer.step()
 
 #     return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future)
-    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
+    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(2*opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
 
 
 # --------- Pre-train loop -----------------------------------
