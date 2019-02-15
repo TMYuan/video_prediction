@@ -197,24 +197,25 @@ def plot(x, epoch):
         frame_predictor.hidden = frame_predictor.init_hidden()
         content_lstm.hidden = content_lstm.init_hidden()
         posterior.hidden = posterior.init_hidden()
-        gen_seq[s].append(x[0])
         x_in = x[0]
-        
-        # generate content vector in each time step and produce global content vector
-        vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
-        _, skip = encoder_c(x[opt.n_past - 1])
-        for i in range(opt.n_past):
-            vec_c_global = content_lstm(vec_c_seq[i])
+        gen_seq[s].append(x_in)
         
         for i in range(1, opt.n_eval):
-            ## When i > opt.n_past, generated frame should be
-            ## put back into encoder to generate content vector
+            if i <= opt.n_past:
+                vec_c, skip = encoder_c(x[i - 1])
+            else:
+                vec_c, _ = encoder_c(gen_seq[s][-1])
+            vec_c_global = content_lstm(vec_c)
+            
             if i < opt.n_past:
+                vec_p, _ = encoder_p(x[i])
+                _, vec_p_global, _ = posterior(vec_p)
+                _ = frame_predictor(vec_p_global)
                 gen_seq[s].append(x[i])
             else:
-                z_t = torch.cuda.FloatTensor(opt.batch_size, opt.z_dim).normal_()
-                h = frame_predictor(z_t).detach()
-                x_in = decoder([torch.cat([vec_c_global, h], 1), skip]).detach()
+                vec_p_global = torch.cuda.FloatTensor(opt.batch_size, opt.z_dim).normal_()
+                h = frame_predictor(vec_p_global)
+                x_in = decoder([torch.cat([vec_c_global, h], 1), skip])
                 gen_seq[s].append(x_in)
 
     to_plot = []
@@ -252,25 +253,36 @@ def plot_rec(x, epoch):
     content_lstm.hidden = content_lstm.init_hidden()
     
     gen_seq = []
-    gen_seq.append(x[0])
     x_in = x[0]
-    # h_seq = [encoder(x[i]) for i in range(opt.n_past+opt.n_future)]
+    gen_seq.append(x_in)
     
-    vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
-    _, skip = encoder_c(x[opt.n_past - 1])
-    for i in range(opt.n_past):
-        vec_c_global = content_lstm(vec_c_seq[i])
-
     for i in range(1, opt.n_past+opt.n_future):
+        # Content vector
+        if i <= opt.n_past:
+            vec_c, skip = encoder_c(x[i - 1])
+        else:
+            vec_c, _ = encoder_c(gen_seq[-1])
+        vec_c_global = content_lstm(vec_c)
+        
+        # Pose vector
+        vec_p, _ = encoder_p(x[i])
+        _, vec_p_global, _ = posterior(vec_p)
+        h_pred = frame_predictor(vec_p_global)
+        
         if i < opt.n_past:
             gen_seq.append(x[i])
         else:
-            vec_p, _ = encoder_p(x[i])
-            
-            vec_p_global, _, _ = posterior(vec_p)
-            h_pred = frame_predictor(vec_p_global).detach()
-            x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip]).detach()
+            x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
             gen_seq.append(x_pred)
+
+    # forward, generate prediction
+#     for i in range(1, opt.n_past+opt.n_future):
+#         if i < opt.n_past:
+#             gen_seq.append(x[i])
+#         else:
+#             h_pred = frame_predictor(vec_p_global)
+#             x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+#             gen_seq.append(x_pred)
 
     to_plot = []
     nrow = min(opt.batch_size, 10)
@@ -452,48 +464,59 @@ def train(x):
     adv_loss = 0
     
     # generate content vector in each time step and produce global content vector
-    vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
-    _, skip = encoder_c(x[opt.n_past - 1])
-    for i in range(opt.n_past):
-        vec_c_global = content_lstm(vec_c_seq[i])
+#     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
+#     skip_seq = [encoder_c(x[i])[1] for i in range(opt.n_past)]
+#     for i in range(opt.n_past):
+#         vec_c, _ = encoder_c(x[i])
+#         vec_c_global = content_lstm(vec_c)
     
-    # Generate pose vector for each time step
-    pred_img_list = []
-    for i in range(opt.n_past, opt.n_past+opt.n_future):
-        vec_p, _ = encoder_p(x[i])
-        
-        vec_p_global, mu, logvar = posterior(vec_p)
+    # Generate pose vector and prediction for each time step
+    vec_p_seq = [encoder_p(x[i])[0] for i in range(opt.n_past+opt.n_future)]
+#     pred_img_list = []
+    
+    for i in range(1, opt.n_past+opt.n_future):
+        if i <= opt.n_past:
+            vec_c, skip = encoder_c(x[i - 1])
+        else:
+            vec_c, _ = encoder_c(x[i - 1])
+
+        vec_c_global = content_lstm(vec_c)
+        vec_p_global, mu, logvar = posterior(vec_p_seq[i])
         h_pred = frame_predictor(vec_p_global)
         x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
         
-        mse += mse_criterion(x_pred, x[i])
         kld += kl_criterion(mu, logvar)
-        pred_img_list.append(x_pred)
+        mse += mse_criterion(x_pred, x[i])
+        if i > 1:
+            preserve_loss += mse_criterion(vec_c_global, vec_c_old)
+        
+        vec_c_old = vec_c_global
+#         pred_img_list.append(x_pred)
 
+    
     # Content Preserve Loss
-    hidden_now = content_lstm.hidden
-    pred_vec_c_seq = [encoder_c(pred)[0] for pred in pred_img_list]
+#     hidden_now = content_lstm.hidden
+#     pred_vec_c_seq = [encoder_c(pred_img_list[i])[0] for i in range(opt.n_past, opt.n_past + opt.n_future)]
     
-    for i in range(opt.n_future):
-        pred_vec_c_global = content_lstm(pred_vec_c_seq[i])
-        preserve_loss += mse_criterion(pred_vec_c_global, vec_c_global)
+#     for i in range(opt.n_future):
+#         pred_vec_c_global = content_lstm(pred_vec_c_seq[i])
+#         preserve_loss += mse_criterion(pred_vec_c_global, vec_c_global)
     
-    content_lstm.hidden = hidden_now
-    gt_vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past, opt.n_past + opt.n_future)]
-    for i in range(opt.n_future):
-        gt_vec_c_global = content_lstm(gt_vec_c_seq[i])
-        preserve_loss += mse_criterion(gt_vec_c_global, vec_c_global)
+#     content_lstm.hidden = hidden_now
+#     gt_vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past, opt.n_past + opt.n_future)]
+#     for i in range(opt.n_future):
+#         gt_vec_c_global = content_lstm(gt_vec_c_seq[i])
+#         preserve_loss += mse_criterion(gt_vec_c_global, vec_c_global)
     
     # Disc. loss
     target_half = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.5)
-    vec_p_seq = [encoder_p(x[i])[0] for i in range(opt.n_past + opt.n_future)]
     for i in range(1, opt.n_past+opt.n_future):
         adv_loss += bce_criterion(discriminator([vec_p_seq[i-1], vec_p_seq[i]]), target_half)
     
     # Swapping content and pose loss
-    swap_mse = swap_cp(x)
+    # swap_mse = swap_cp(x)
     
-    loss = mse + kld*opt.beta + 0.1*preserve_loss + swap_mse + adv_loss
+    loss = mse + kld*opt.beta + 0.1*preserve_loss + adv_loss
 #     loss = mse + kld*opt.beta
     loss.backward()
 
@@ -505,7 +528,7 @@ def train(x):
     decoder_optimizer.step()
 
 #     return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future)
-    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future), preserve_loss.data.cpu().numpy()/(2*opt.n_future), swap_mse.data.cpu().numpy()/(opt.n_past), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
+    return mse.data.cpu().numpy()/(opt.n_past+opt.n_future), kld.data.cpu().numpy()/(opt.n_past+opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_past+opt.n_future), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
 
 
 # --------- Pre-train loop -----------------------------------
@@ -574,19 +597,19 @@ for epoch in tqdm(range(opt.niter), desc='EPOCH'):
         # train disc.
         epoch_loss_d += train_D(x, y)
         # train frame_predictor
-        mse, kld, preserve, swap_mse, adv_loss = train(x)
+        mse, kld, preserve, adv_loss = train(x)
 #         mse, kld = train(x)
         epoch_mse += mse
         epoch_kld += kld
         epoch_preserve += preserve
-        epoch_swap_mse += swap_mse
+        # epoch_swap_mse += swap_mse
         epoch_adv_loss += adv_loss
         
 
 
 #     print('[%02d] mse loss: %.5f | kld loss: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
 #     print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
-    print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f | swap mse: %.5f | loss D: %.5f | adv loss: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch_swap_mse/opt.epoch_size, epoch_loss_d/opt.epoch_size, epoch_adv_loss/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+    print('[%02d] mse loss: %.5f | kld loss: %.5f | preserve: %.5f | loss D: %.5f | adv loss: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_preserve/opt.epoch_size, epoch_loss_d/opt.epoch_size, epoch_adv_loss/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
 
     # plot some stuff
     frame_predictor.eval()

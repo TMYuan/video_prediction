@@ -97,7 +97,6 @@ def make_gifs(x, idx, name):
     posterior.hidden = posterior.init_hidden()
     content_lstm.hidden = content_lstm.init_hidden()
     posterior_gen = []
-    posterior_gen.append(x[0])
     x_in = x[0]
     
     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
@@ -105,13 +104,12 @@ def make_gifs(x, idx, name):
     for i in range(opt.n_past):
         vec_c_global = content_lstm(vec_c_seq[i])
     
-    for i in range(1, opt.n_eval):
+    for i in range(0, opt.n_eval):
+        vec_p, _ = encoder_p(x[i])
+        _, vec_p_global, _ = posterior(vec_p)
         if i < opt.n_past:
             posterior_gen.append(x[i])
         else:
-            vec_p, _ = encoder_p(x[i])
-            
-            _, vec_p_global, _ = posterior(vec_p)
             h_pred = frame_predictor(vec_p_global).detach()
             x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
             posterior_gen.append(x_pred)
