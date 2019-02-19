@@ -136,6 +136,9 @@ def make_gifs(x, idx, name):
         
         for i in range(1, opt.n_eval):
             if i < opt.n_past:
+                vec_p, _ = encoder_p(x[i])
+                _, vec_p_global, _ = posterior(vec_p)
+                h_pred = frame_predictor(vec_p_global).detach()
                 all_gen[s].append(x[i])
             else:
                 vec_p_global = torch.cuda.FloatTensor(opt.batch_size, opt.z_dim).normal_()

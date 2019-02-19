@@ -91,9 +91,9 @@ if opt.model_dir != '':
     content_lstm = saved_model['content_lstm']
     posterior = saved_model['posterior']
 else:
-    frame_predictor = lstm_models.lstm(opt.z_dim, opt.z_dim, opt.rnn_size, opt.predictor_rnn_layers, opt.batch_size)
+    frame_predictor = lstm_models.lstm(opt.z_dim + opt.g_dim, opt.g_dim, opt.rnn_size, opt.predictor_rnn_layers, opt.batch_size)
     content_lstm = lstm_models.lstm(opt.g_dim, opt.g_dim, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
-    posterior = lstm_models.gaussian_lstm(opt.z_dim, opt.z_dim, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
+    posterior = lstm_models.gaussian_lstm(opt.g_dim, opt.z_dim, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
     frame_predictor.apply(utils.init_weights)
     content_lstm.apply(utils.init_weights)
     posterior.apply(utils.init_weights)
@@ -117,9 +117,9 @@ if opt.model_dir != '':
     encoder_p = saved_model['encoder_p']
     encoder_c = saved_model['encoder_c']
 else:
-    encoder_p = model.encoder(opt.z_dim, opt.channels)
+    encoder_p = model.encoder(opt.g_dim, opt.channels)
     encoder_c = model.encoder(opt.g_dim, opt.channels)
-    decoder = model.decoder(opt.g_dim + opt.z_dim, opt.channels)
+    decoder = model.decoder(opt.g_dim, opt.channels)
     discriminator = D.discriminator(opt.z_dim)
     
     encoder_p.apply(utils.init_weights)
@@ -210,12 +210,12 @@ def plot(x, epoch):
             if i < opt.n_past:
                 vec_p, _ = encoder_p(x[i])
                 _, vec_p_global, _ = posterior(vec_p)
-                _ = frame_predictor(vec_p_global)
+                _ = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1))
                 gen_seq[s].append(x[i])
             else:
                 vec_p_global = torch.cuda.FloatTensor(opt.batch_size, opt.z_dim).normal_()
-                h = frame_predictor(vec_p_global)
-                x_in = decoder([torch.cat([vec_c_global, h], 1), skip])
+                h = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1))
+                x_in = decoder([h, skip])
                 gen_seq[s].append(x_in)
 
     to_plot = []
@@ -261,18 +261,18 @@ def plot_rec(x, epoch):
         if i <= opt.n_past:
             vec_c, skip = encoder_c(x[i - 1])
         else:
-            vec_c, _ = encoder_c(gen_seq[-1])
+            vec_c, _ = encoder_c(x[i - 1])
         vec_c_global = content_lstm(vec_c)
         
         # Pose vector
         vec_p, _ = encoder_p(x[i])
         _, vec_p_global, _ = posterior(vec_p)
-        h_pred = frame_predictor(vec_p_global)
+        h_pred = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1))
         
         if i < opt.n_past:
             gen_seq.append(x[i])
         else:
-            x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+            x_pred = decoder([h_pred, skip])
             gen_seq.append(x_pred)
 
     # forward, generate prediction
@@ -482,15 +482,15 @@ def train(x):
 
         vec_c_global = content_lstm(vec_c)
         vec_p_global, mu, logvar = posterior(vec_p_seq[i])
-        h_pred = frame_predictor(vec_p_global)
-        x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+        h_pred = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1))
+        x_pred = decoder([h_pred, skip])
         
         kld += kl_criterion(mu, logvar)
         mse += mse_criterion(x_pred, x[i])
-        if i > 1:
-            preserve_loss += mse_criterion(vec_c_global, vec_c_old)
+#         if i > 1:
+#             preserve_loss += mse_criterion(vec_c_global, vec_c_old)
         
-        vec_c_old = vec_c_global
+#         vec_c_old = vec_c_global
 #         pred_img_list.append(x_pred)
 
     
@@ -509,15 +509,15 @@ def train(x):
 #         preserve_loss += mse_criterion(gt_vec_c_global, vec_c_global)
     
     # Disc. loss
-    target_half = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.5)
-    for i in range(1, opt.n_past+opt.n_future):
-        adv_loss += bce_criterion(discriminator([vec_p_seq[i-1], vec_p_seq[i]]), target_half)
+#     target_half = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.5)
+#     for i in range(1, opt.n_past+opt.n_future):
+#         adv_loss += bce_criterion(discriminator([vec_p_seq[i-1], vec_p_seq[i]]), target_half)
     
     # Swapping content and pose loss
     # swap_mse = swap_cp(x)
     
-    loss = mse + kld*opt.beta + 0.1*preserve_loss + adv_loss
-#     loss = mse + kld*opt.beta
+#     loss = mse + kld*opt.beta + 0.1*preserve_loss + adv_loss
+    loss = mse + kld*opt.beta
     loss.backward()
 
     frame_predictor_optimizer.step()
@@ -527,8 +527,8 @@ def train(x):
     encoder_p_optimizer.step()
     decoder_optimizer.step()
 
-#     return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future)
-    return mse.data.cpu().numpy()/(opt.n_past+opt.n_future), kld.data.cpu().numpy()/(opt.n_past+opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_past+opt.n_future), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
+    return mse.data.cpu().numpy()/(opt.n_future), kld.data.cpu().numpy()/(opt.n_future)
+#     return mse.data.cpu().numpy()/(opt.n_past+opt.n_future), kld.data.cpu().numpy()/(opt.n_past+opt.n_future), preserve_loss.data.cpu().numpy()/(opt.n_past+opt.n_future), adv_loss.data.cpu().numpy()/(opt.n_past+opt.n_future)
 
 
 # --------- Pre-train loop -----------------------------------
@@ -592,18 +592,18 @@ for epoch in tqdm(range(opt.niter), desc='EPOCH'):
     
     for i in tqdm(range(opt.epoch_size), desc='BATCH'):
         x = next(training_batch_generator)
-        y = next(training_batch_generator)
+#         y = next(training_batch_generator)
         
         # train disc.
-        epoch_loss_d += train_D(x, y)
+#         epoch_loss_d += train_D(x, y)
         # train frame_predictor
-        mse, kld, preserve, adv_loss = train(x)
-#         mse, kld = train(x)
+#         mse, kld, preserve, adv_loss = train(x)
+        mse, kld = train(x)
         epoch_mse += mse
         epoch_kld += kld
-        epoch_preserve += preserve
+#         epoch_preserve += preserve
         # epoch_swap_mse += swap_mse
-        epoch_adv_loss += adv_loss
+#         epoch_adv_loss += adv_loss
         
 
 
