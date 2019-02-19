@@ -51,7 +51,7 @@ def convert_data(dname):
         f = f.split('/')[-1]
         os.makedirs('%s/processed_data/%s/%s/%d/' % (opt.data_dir, dname,  f[:-10], k), exist_ok=True)
         for i in range(len(seq)):
-            imsave('/%s/processed_data/%s/%s/%d/%d.png' % (opt.data_dir, dname,  f[:-10], k, i), seq[i])
+            imsave('%s/processed_data/%s/%s/%d/%d.png' % (opt.data_dir, dname,  f[:-10], k, i), seq[i])
 
         print('%s data: %s (%d)  (%d)' % (dname, f, k, n))
 
