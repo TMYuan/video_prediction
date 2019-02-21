@@ -120,7 +120,7 @@ else:
     encoder_p = model.encoder(opt.g_dim, opt.channels)
     encoder_c = model.encoder(opt.g_dim, opt.channels)
     decoder = model.decoder(opt.g_dim + opt.z_dim, opt.channels)
-    discriminator = D.discriminator(opt.z_dim)
+    discriminator = D.discriminator(opt.g_dim)
     
     encoder_p.apply(utils.init_weights)
     encoder_c.apply(utils.init_weights)
@@ -474,6 +474,7 @@ def train(x):
     # Generate pose vector and prediction for each time step
     vec_p_seq = [encoder_p(x[i])[0] for i in range(opt.n_past+opt.n_future)]
     pred_img_list = []
+    pred_img_list.append(x[0])
     
     for i in range(1, opt.n_past+opt.n_future):
 #         if i <= opt.n_past:
@@ -596,18 +597,18 @@ for epoch in tqdm(range(opt.niter), desc='EPOCH'):
     
     for i in tqdm(range(opt.epoch_size), desc='BATCH'):
         x = next(training_batch_generator)
-#         y = next(training_batch_generator)
+        y = next(training_batch_generator)
         
         # train disc.
-#         epoch_loss_d += train_D(x, y)
+        epoch_loss_d += train_D(x, y)
         # train frame_predictor
-#         mse, kld, preserve, adv_loss = train(x)
-        mse, kld = train(x)
+        mse, kld, preserve, adv_loss = train(x)
+#         mse, kld = train(x)
         epoch_mse += mse
         epoch_kld += kld
-#         epoch_preserve += preserve
+        epoch_preserve += preserve
         # epoch_swap_mse += swap_mse
-#         epoch_adv_loss += adv_loss
+        epoch_adv_loss += adv_loss
         
 
 
