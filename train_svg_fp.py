@@ -117,8 +117,8 @@ if opt.model_dir != '':
     encoder_p = saved_model['encoder_p']
     encoder_c = saved_model['encoder_c']
 else:
-    encoder_p = model.encoder(opt.g_dim, (opt.n_past + 1)*opt.channels)
-    encoder_c = model.encoder(opt.g_dim, opt.channels)
+    encoder_p = model.encoder(opt.g_dim, opt.channels, conditional=True)
+    encoder_c = model.encoder(opt.g_dim, opt.channels, conditional=False)
     decoder = model.decoder(opt.g_dim + opt.g_dim, opt.channels)
     discriminator = D.discriminator(opt.g_dim)
     
@@ -205,6 +205,10 @@ def plot(x, epoch):
             vec_c_global = content_lstm(vec_c)
         _, skip = encoder_c(x[opt.n_past - 1])
         
+        for i in range(1, opt.n_past):
+            vec_p, _ = encoder_p(x[i], vec_c_global)
+            vec_p_global, mu, logvar = posterior(vec_p)
+        
         for i in range(1, opt.n_eval):
 #             if i <= opt.n_past:
 #                 vec_c, skip = encoder_c(x[i - 1])
@@ -213,8 +217,9 @@ def plot(x, epoch):
 #             vec_c_global = content_lstm(vec_c)
             
             if i < opt.n_past:
-                vec_p, _ = encoder_p(torch.cat(x[:opt.n_past] + [x[i]], 1))
-                _, vec_p_global, _ = posterior(vec_p)
+#                 vec_p, _ = encoder_p(torch.cat(x[:opt.n_past] + [x[i]], 1))
+#                 vec_p, _ = encoder_p(x[i], vec_c_global)
+#                 _, vec_p_global, _ = posterior(vec_p)
                 _ = frame_predictor(vec_p_global)
                 gen_seq[s].append(x[i])
             else:
@@ -268,6 +273,11 @@ def plot_rec(x, epoch):
     _, skip = encoder_c(x[opt.n_past - 1])
     
     for i in range(1, opt.n_past+opt.n_future):
+        vec_p, _ = encoder_p(x[i], vec_c_global)
+        vec_p_global, mu, logvar = posterior(vec_p)
+    
+    
+    for i in range(1, opt.n_past+opt.n_future):
         # Content vector
 #         if i <= opt.n_past:
 #             vec_c, skip = encoder_c(x[i - 1])
@@ -276,8 +286,9 @@ def plot_rec(x, epoch):
 #         vec_c_global = content_lstm(vec_c)
         
         # Pose vector
-        vec_p, _ = encoder_p(torch.cat(x[:opt.n_past] + [x[i]], 1))
-        _, vec_p_global, _ = posterior(vec_p)
+#         vec_p, _ = encoder_p(torch.cat(x[:opt.n_past] + [x[i]], 1))
+#         vec_p, _ = encoder_p(x[i], vec_c_global)
+#         _, vec_p_global, _ = posterior(vec_p)
         h_pred = frame_predictor(vec_p_global)
         
         if i < opt.n_past:
@@ -490,19 +501,26 @@ def train(x):
     pred_img_list.append(x[0])
     
     for i in range(1, opt.n_past+opt.n_future):
+        vec_p, _ = encoder_p(x[i], vec_c_global)
+        vec_p_global, mu, logvar = posterior(vec_p)
+    kld = kl_criterion(mu, logvar)
+    
+    
+    for i in range(1, opt.n_past+opt.n_future):
 #         if i <= opt.n_past:
 #             vec_c, skip = encoder_c(x[i - 1])
 #         else:
 #             vec_c, _ = encoder_c(x[i - 1])
 #         vec_c_global = content_lstm(vec_c)
-        
-        vec_p, _ = encoder_p(torch.cat(x[:opt.n_past] + [x[i]], 1))
-        vec_p_global, mu, logvar = posterior(vec_p)
+
+#         vec_p, _ = encoder_p(torch.cat(x[:opt.n_past] + [x[i]], 1))
+        vec_p, _ = encoder_p(x[i], vec_c_global)
+#         vec_p_global, mu, logvar = posterior(vec_p)
         h_pred = frame_predictor(vec_p_global)
 #         x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
         x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
         
-        kld += kl_criterion(mu, logvar)
+#         kld += kl_criterion(mu, logvar)
         mse += mse_criterion(x_pred, x[i])
         pose_recon += mse_criterion(h_pred, vec_p)
 #         if i > 1:
