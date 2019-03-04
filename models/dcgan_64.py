@@ -6,7 +6,8 @@ class dcgan_conv(nn.Module):
         super(dcgan_conv, self).__init__()
         self.main = nn.Sequential(
                 nn.Conv2d(nin, nout, 4, 2, 1),
-                nn.BatchNorm2d(nout),
+#                 nn.BatchNorm2d(nout),
+                nn.InstanceNorm2d(nout, affine=True),
                 nn.LeakyReLU(0.2, inplace=True),
                 )
 
@@ -18,7 +19,8 @@ class dcgan_upconv(nn.Module):
         super(dcgan_upconv, self).__init__()
         self.main = nn.Sequential(
                 nn.ConvTranspose2d(nin, nout, 4, 2, 1),
-                nn.BatchNorm2d(nout),
+#                 nn.BatchNorm2d(nout),
+                nn.InstanceNorm2d(nout, affine=True),
                 nn.LeakyReLU(0.2, inplace=True),
                 )
 
@@ -41,7 +43,8 @@ class encoder(nn.Module):
         # state size. (nf*8) x 4 x 4
         self.c5 = nn.Sequential(
                 nn.Conv2d(nf * 8, dim, 4, 1, 0),
-                nn.BatchNorm2d(dim),
+#                 nn.BatchNorm2d(dim),
+#                 nn.InstanceNorm2d(dim),
                 nn.Tanh()
                 )
 
@@ -62,7 +65,8 @@ class decoder(nn.Module):
         self.upc1 = nn.Sequential(
                 # input is Z, going into a convolution
                 nn.ConvTranspose2d(dim, nf * 8, 4, 1, 0),
-                nn.BatchNorm2d(nf * 8),
+#                 nn.BatchNorm2d(nf * 8),
+                nn.InstanceNorm2d(nf * 8, affine=True),
                 nn.LeakyReLU(0.2, inplace=True)
                 )
         # state size. (nf*8) x 4 x 4

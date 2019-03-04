@@ -98,20 +98,28 @@ def make_gifs(x, idx, name):
     content_lstm.hidden = content_lstm.init_hidden()
     posterior_gen = []
     x_in = x[0]
+    posterior_gen.append(x_in)
     
-    vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
-    _, skip = encoder_c(x[opt.n_past - 1])
-    for i in range(opt.n_past):
-        vec_c_global = content_lstm(vec_c_seq[i])
+#     vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
+#     _, skip = encoder_c(x[opt.n_past - 1])
+#     for i in range(opt.n_past):
+#         vec_c_global = content_lstm(vec_c_seq[i])
     
-    for i in range(0, opt.n_eval):
+    for i in range(1, opt.n_eval):
+        if i <= opt.n_past:
+            vec_c, skip = encoder_c(x[i - 1])
+        else:
+            vec_c, _ = encoder_c(x[i - 1])
+        vec_c_global = content_lstm(vec_c)
+        
         vec_p, _ = encoder_p(x[i])
         _, vec_p_global, _ = posterior(vec_p)
+        h_pred = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1)).detach()
+        
         if i < opt.n_past:
             posterior_gen.append(x[i])
         else:
-            h_pred = frame_predictor(vec_p_global).detach()
-            x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+            x_pred = decoder([h_pred, skip])
             posterior_gen.append(x_pred)
   
     # random sample
@@ -129,21 +137,27 @@ def make_gifs(x, idx, name):
         all_gen.append([])
         all_gen[s].append(x_in)
         
-        vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
-        _, skip = encoder_c(x[opt.n_past - 1])
-        for i in range(opt.n_past):
-            vec_c_global = content_lstm(vec_c_seq[i])
+#         vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
+#         _, skip = encoder_c(x[opt.n_past - 1])
+#         for i in range(opt.n_past):
+#             vec_c_global = content_lstm(vec_c_seq[i])
         
         for i in range(1, opt.n_eval):
+            if i <= opt.n_past:
+                vec_c, skip = encoder_c(x[i - 1])
+            else:
+                vec_c, _ = encoder_c(all_gen[s][-1])
+            vec_c_global = content_lstm(vec_c)
+            
             if i < opt.n_past:
                 vec_p, _ = encoder_p(x[i])
                 _, vec_p_global, _ = posterior(vec_p)
-                h_pred = frame_predictor(vec_p_global).detach()
+                h_pred = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1)).detach()
                 all_gen[s].append(x[i])
             else:
                 vec_p_global = torch.cuda.FloatTensor(opt.batch_size, opt.z_dim).normal_()
-                h_pred = frame_predictor(vec_p_global).detach()
-                x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+                h_pred = frame_predictor(torch.cat([vec_c_global, vec_p_global], 1)).detach()
+                x_pred = decoder([h_pred, skip])
                 gen_seq.append(x_pred.data.cpu().numpy())
                 gt_seq.append(x[i].data.cpu().numpy())
                 all_gen[s].append(x_pred)
