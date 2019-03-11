@@ -62,7 +62,7 @@ if opt.model_dir != '':
     opt.pretrain = pretrain
     opt.niter = niter
     opt.epoch_size = epoch_size
-    opt.log_dir = '%s/continue_2' % opt.log_dir
+    opt.log_dir = '%s/content_preserve_updated' % opt.log_dir
 else:
     name = 'model=%s%dx%d-rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%d-beta=%.7f%s' % (opt.model, opt.image_width, opt.image_width, opt.rnn_size, opt.predictor_rnn_layers, opt.posterior_rnn_layers, opt.n_past, opt.n_future, opt.lr, opt.g_dim, opt.z_dim, opt.last_frame_skip, opt.beta, opt.name)
     if opt.dataset == 'smmnist':
@@ -556,6 +556,7 @@ def train_overall(x):
     kld += kl_criterion(mu, logvar)
     
     # for pose reconstruction loss (only train pose lstm, fix pose encoder)
+    frame_predictor.hidden = frame_predictor.init_hidden()
     for i in range(opt.n_past+opt.n_future):
         if i > 0:
             vec_in = vec_p_seq[i - 1].detach()
@@ -567,6 +568,7 @@ def train_overall(x):
         pose_recon += mse_criterion(vec_p_recon, vec_p_target)
     
     # for image reconstruction loss (train all model)
+    frame_predictor.hidden = frame_predictor.init_hidden()
     for i in range(opt.n_past+opt.n_future):
         if i > 0:
             vec_in = vec_p_seq[i - 1]
@@ -577,26 +579,11 @@ def train_overall(x):
         
         mse += mse_criterion(x_pred, x[i])
     
-    # for content preservation loss (train decoder, pose branch; fix content branch)
-    vec_c_fix = vec_c_global.detach()
-    skip_fix = [s.detach() for s in skip]
-    vec_p_seq = [encoder_p(x[i], vec_c_fix)[0] for i in range(opt.n_past+opt.n_future)]
-    for i in range(opt.n_past+opt.n_future):
-        if i > 0:
-            vec_in = vec_p_seq[i - 1]
-        else:
-            vec_in = torch.zeros_like(vec_p)
-        vec_p_recon = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
-        x_pred = decoder([torch.cat([vec_c_global, vec_p_recon], 1), skip])
-        
-        with torch.no_grad():
-            vec_c, _ = encoder_c(x_pred)
-            vec_c_pred = content_lstm(vec_c)
-            
-        preserve += mse_criterion(vec_c_pred, vec_c_fix)
+    # content preserve loss
+    preserve = train_preserve(x)
     
     # backward
-    loss = mse + pose_recon + kld*opt.beta + 0*preserve
+    loss = mse + pose_recon + kld*opt.beta + preserve
 #     loss = mse + pose_recon + kld*opt.beta
     loss.backward()
     
@@ -607,8 +594,63 @@ def train_overall(x):
     frame_predictor_optimizer.step()
     posterior_optimizer.step()
     
-    return mse.data.cpu().numpy()/(opt.n_past+opt.n_future), kld.data.cpu().numpy(), pose_recon.data.cpu().numpy()/(opt.n_past+opt.n_future), preserve.data.cpu().numpy()/(opt.n_past+opt.n_future)
+    return mse.data.cpu().numpy()/(opt.n_past+opt.n_future), kld.data.cpu().numpy(), pose_recon.data.cpu().numpy()/(opt.n_past+opt.n_future), preserve.data.cpu().numpy()/(opt.n_future)
 #     return mse.data.cpu().numpy()/(opt.n_past+opt.n_future), kld.data.cpu().numpy(), pose_recon.data.cpu().numpy()/(opt.n_past+opt.n_future)
+
+# content preservation (train decoder, pose branch; fix content branch)
+def train_preserve(x):
+    #log variable
+    preserve = 0
+    
+    # zero_grad and initialize the hidden state.
+#     content_lstm.zero_grad()
+#     encoder_p.zero_grad()
+#     encoder_c.zero_grad()
+#     decoder.zero_grad()
+#     frame_predictor.zero_grad()
+#     posterior.zero_grad()
+    
+    content_lstm.hidden = content_lstm.init_hidden()
+    frame_predictor.hidden = frame_predictor.init_hidden()
+    posterior.hidden = posterior.init_hidden()
+    
+    # generate content vector in each time step and produce global content vector
+    vec_c_seq = [encoder_c(x[i])[0] for i in range(opt.n_past)]
+    for i in range(opt.n_past):
+        vec_c_global = content_lstm(vec_c_seq[i])
+    vec_c_fix = vec_c_global.detach()
+    _, skip = encoder_c(x[opt.n_past - 1])
+    skip_fix = [s.detach() for s in skip]
+    
+    # re-generate global pose vector
+    vec_p_seq = [encoder_p(x[i], vec_c_fix)[0] for i in range(opt.n_past+opt.n_future)]
+    for i in range(opt.n_past+opt.n_future):
+        vec_p = vec_p_seq[i].detach()
+        vec_p_global, mu, logvar = posterior(vec_p)
+    
+    # content preserve loss
+    for i in range(opt.n_past+opt.n_future):
+        if i > 0:
+            vec_in = vec_p_seq[i - 1]
+        else:
+            vec_in = torch.zeros_like(vec_p)
+        vec_p_recon = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
+        
+        if i >= opt.n_past:
+            x_pred = decoder([torch.cat([vec_c_fix, vec_p_recon], 1), skip_fix])
+            with torch.no_grad():
+                vec_c, _ = encoder_c(x_pred)
+                vec_c_pred = content_lstm(vec_c)
+            preserve += mse_criterion(vec_c_pred, vec_c_fix)
+    
+#     loss = preserve
+#     loss.backward()
+    
+#     encoder_p_optimizer.step()
+#     decoder_optimizer.step()
+#     frame_predictor_optimizer.step()
+#     posterior_optimizer.step()
+    return preserve
 
 # --------- Pre-train loop -----------------------------------
 # Train the model without temporary on pose encoder & variation

@@ -1,6 +1,7 @@
 import torch
 import torch.optim as optim
 import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 import os
 import random
@@ -97,6 +98,7 @@ def make_gifs(x, idx, name):
     posterior.hidden = posterior.init_hidden()
     content_lstm.hidden = content_lstm.init_hidden()
     posterior_gen = []
+    log_cos_1 = []
     
     for i in range(opt.n_past):
         vec_c, _ = encoder_c(x[i])
@@ -105,7 +107,7 @@ def make_gifs(x, idx, name):
     
     for i in range(opt.n_eval):
         vec_p, _ = encoder_p(x[i], vec_c_global)
-        _, vec_p_global, _ = posterior(vec_p)
+        vec_p_global, _, _ = posterior(vec_p)
     
     for i in range(opt.n_eval):
         if i < opt.n_past:
@@ -115,15 +117,28 @@ def make_gifs(x, idx, name):
                 vec_in, _ = encoder_p(x[i - 1], vec_c_global)
             _ = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
             posterior_gen.append(x[i])
+            log_cos_1.append(F.cosine_similarity(vec_c_global.squeeze(), vec_c_global.squeeze()).data.cpu().numpy())
         else:
             vec_in, _ = encoder_p(x[i - 1], vec_c_global)
             h_pred = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
             x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+            vec_c_pred, _ = encoder_c(x_pred)
+            vec_c_g_pred = content_lstm(vec_c_pred)
+            cos_sim = F.cosine_similarity(vec_c_g_pred.squeeze(), vec_c_global.squeeze())
             posterior_gen.append(x_pred)
+            log_cos_1.append(cos_sim.data.cpu().numpy())
             
     # initailize teporary model
     frame_predictor.hidden = frame_predictor.init_hidden()
+    content_lstm.hidden = content_lstm.init_hidden()
     posterior_gen_2 = []
+    log_cos_2 = []
+    
+    for i in range(opt.n_past):
+        vec_c, _ = encoder_c(x[i])
+        vec_c_global = content_lstm(vec_c)
+    _, skip = encoder_c(x[opt.n_past - 1])
+    
     for i in range(opt.n_eval):
         if i < opt.n_past:
             if i == 0:
@@ -132,17 +147,23 @@ def make_gifs(x, idx, name):
                 vec_in, _ = encoder_p(x[i - 1], vec_c_global)
             _ = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
             posterior_gen_2.append(x[i])
+            log_cos_2.append(F.cosine_similarity(vec_c_global.squeeze(), vec_c_global.squeeze()).data.cpu().numpy())
         else:
             vec_in, _ = encoder_p(posterior_gen_2[-1], vec_c_global)
             h_pred = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
             x_pred = decoder([torch.cat([vec_c_global, h_pred], 1), skip])
+            vec_c_pred, _ = encoder_c(x_pred)
+            vec_c_g_pred = content_lstm(vec_c_pred)
+            cos_sim = F.cosine_similarity(vec_c_g_pred.squeeze(), vec_c_global.squeeze())
             posterior_gen_2.append(x_pred)
+            log_cos_2.append(cos_sim.data.cpu().numpy())
 
     # random sample
     nsample = opt.nsample
     ssim = np.zeros((opt.batch_size, nsample, opt.n_future))
     psnr = np.zeros((opt.batch_size, nsample, opt.n_future))
     all_gen = []
+    all_log = []
     for s in tqdm(range(nsample), desc='sample'):
         gen_seq = []
         gt_seq = []
@@ -150,6 +171,7 @@ def make_gifs(x, idx, name):
         posterior.hidden = posterior.init_hidden()
         content_lstm.hidden = content_lstm.init_hidden()
         all_gen.append([])
+        all_log.append([])
         
         for i in range(opt.n_past):
             vec_c, _ = encoder_c(x[i])
@@ -158,7 +180,7 @@ def make_gifs(x, idx, name):
         
         for i in range(opt.n_past):
             vec_p, _ = encoder_p(x[i], vec_c_global)
-            _, vec_p_global, _ = posterior(vec_p)
+            vec_p_global, _, _ = posterior(vec_p)
 
         for i in range(opt.n_eval):
             if i < opt.n_past:
@@ -168,14 +190,20 @@ def make_gifs(x, idx, name):
                     vec_in, _ = encoder_p(x[i - 1], vec_c_global)
                 _ = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
                 all_gen[s].append(x[i])
+                all_log[s].append(F.cosine_similarity(vec_c_global.squeeze(), vec_c_global.squeeze()).data.cpu().numpy())
             else:
                 vec_in, _ = encoder_p(all_gen[s][-1], vec_c_global)
                 h = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
                 x_pred = decoder([torch.cat([vec_c_global, h], 1), skip])
+                
+                vec_c_pred, _ = encoder_c(x_pred)
+                vec_c_g_pred = content_lstm(vec_c_pred)
+                cos_sim = F.cosine_similarity(vec_c_g_pred.squeeze(), vec_c_global.squeeze())
 
                 gen_seq.append(x_pred.data.cpu().numpy())
                 gt_seq.append(x[i].data.cpu().numpy())
                 all_gen[s].append(x_pred)
+                all_log[s].append(cos_sim.data.cpu().numpy())
         _, ssim[:, s, :], psnr[:, s, :] = utils.eval_seq(gt_seq, gen_seq)
 
 
@@ -196,14 +224,14 @@ def make_gifs(x, idx, name):
             else:
                 color = 'red'
             gifs[t].append(add_border(posterior_gen[t][i], color))
-            text[t].append('Approx.\nposterior')
+            text[t].append('Approx.\n %.4f' % (log_cos_1[t][i]))
             #posterior_2
             if t < opt.n_past:
                 color = 'green'
             else:
                 color = 'red'
             gifs[t].append(add_border(posterior_gen_2[t][i], color))
-            text[t].append('Approx.\nposterior_2')
+            text[t].append('Approx._2\n %.4f' % (log_cos_2[t][i]))
             # best 
             if t < opt.n_past:
                 color = 'green'
@@ -211,14 +239,14 @@ def make_gifs(x, idx, name):
                 color = 'red'
             sidx = ordered[-1]
             gifs[t].append(add_border(all_gen[sidx][t][i], color))
-            text[t].append('Best SSIM')
+            text[t].append('Best SSIM\n %.4f' % (all_log[sidx][t][i]))
             # random 3
             for s in range(len(rand_sidx)):
                 gifs[t].append(add_border(all_gen[rand_sidx[s]][t][i], color))
-                text[t].append('Random\nsample %d' % (s+1))
+                text[t].append('Random %d\n %.4f' % (s+1, all_log[s][t][i]))
 
         fname = '%s/%s_%d.gif' % (opt.log_dir, name, idx+i) 
-        utils.save_gif_with_text(fname, gifs, text)
+        utils.save_gif_with_text(fname, gifs, text, 1)
     return ssim
 
 def add_border(x, color, pad=1):
