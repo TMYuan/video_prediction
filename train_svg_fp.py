@@ -4,6 +4,7 @@ from torch.utils.data import DataLoader
 import torch
 import torch.optim as optim
 import torch.nn as nn
+import torch.nn.functional as F
 import argparse
 import os
 import random
@@ -54,6 +55,7 @@ if opt.model_dir != '':
     pre_niter = opt.pre_niter
     niter = opt.niter
     epoch_size = opt.epoch_size
+    batch_size = opt.batch_size
     opt = saved_model['opt']
     opt.optimizer = optimizer
     opt.model_dir = model_dir
@@ -62,7 +64,8 @@ if opt.model_dir != '':
     opt.pretrain = pretrain
     opt.niter = niter
     opt.epoch_size = epoch_size
-    opt.log_dir = '%s/content_preserve_updated' % opt.log_dir
+    opt.batch_size = batch_size
+    opt.log_dir = '%s/content_preserve_update_in_one_forward' % opt.log_dir
 else:
     name = 'model=%s%dx%d-rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%d-beta=%.7f%s' % (opt.model, opt.image_width, opt.image_width, opt.rnn_size, opt.predictor_rnn_layers, opt.posterior_rnn_layers, opt.n_past, opt.n_future, opt.lr, opt.g_dim, opt.z_dim, opt.last_frame_skip, opt.beta, opt.name)
     if opt.dataset == 'smmnist':
@@ -583,12 +586,14 @@ def train_overall(x):
     preserve = train_preserve(x)
     
     # backward
-    loss = mse + pose_recon + kld*opt.beta + preserve
-#     loss = mse + pose_recon + kld*opt.beta
-    loss.backward()
+#     loss = mse + pose_recon + kld*opt.beta + preserve
+    loss = mse + pose_recon + kld*opt.beta
     
+    loss.backward(retain_graph=True)
     content_lstm_optimizer.step()
     encoder_c_optimizer.step()
+    
+    preserve.backward()
     encoder_p_optimizer.step()
     decoder_optimizer.step()
     frame_predictor_optimizer.step()
@@ -638,9 +643,8 @@ def train_preserve(x):
         
         if i >= opt.n_past:
             x_pred = decoder([torch.cat([vec_c_fix, vec_p_recon], 1), skip_fix])
-            with torch.no_grad():
-                vec_c, _ = encoder_c(x_pred)
-                vec_c_pred = content_lstm(vec_c)
+            vec_c, _ = encoder_c(x_pred)
+            vec_c_pred = content_lstm(vec_c)
             preserve += mse_criterion(vec_c_pred, vec_c_fix)
     
 #     loss = preserve
@@ -733,6 +737,8 @@ for epoch in tqdm(range(opt.niter), desc='EPOCH'):
 #         mse, kld, preserve, adv_loss = train(x)
 #         mse, kld, preserve = train(x)
         mse, kld, pose_recon, preserve = train_overall(x)
+#         mse, kld, pose_recon = train_overall(x)
+#         preserve = train_preserve(x)
         epoch_mse += mse
         epoch_kld += kld
         epoch_pose_recon += pose_recon
