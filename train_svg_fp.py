@@ -65,7 +65,7 @@ if opt.model_dir != '':
     opt.niter = niter
     opt.epoch_size = epoch_size
     opt.batch_size = batch_size
-    opt.log_dir = '%s/content_preserve_update_in_one_forward' % opt.log_dir
+    opt.log_dir = '%s/CP_for_decoder' % opt.log_dir
 else:
     name = 'model=%s%dx%d-rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%d-beta=%.7f%s' % (opt.model, opt.image_width, opt.image_width, opt.rnn_size, opt.predictor_rnn_layers, opt.posterior_rnn_layers, opt.n_past, opt.n_future, opt.lr, opt.g_dim, opt.z_dim, opt.last_frame_skip, opt.beta, opt.name)
     if opt.dataset == 'smmnist':
@@ -151,11 +151,15 @@ decoder_optimizer = opt.optimizer(decoder.parameters(), lr=opt.lr, betas=(opt.be
 # --------- loss functions ------------------------------------
 mse_criterion = nn.MSELoss()
 bce_criterion = nn.BCELoss()
+cos_criterion = nn.CosineEmbeddingLoss()
 def kl_criterion(mu, logvar):
   # 0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
   KLD = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
   KLD /= opt.batch_size  
   return KLD
+
+# def cos_criterion(x, y):
+#     return 1 - F.cosine_similarity(x.squeeze(), y.squeeze())
 
 
 # --------- transfer to gpu ------------------------------------
@@ -168,6 +172,7 @@ encoder_c.cuda()
 decoder.cuda()
 mse_criterion.cuda()
 bce_criterion.cuda()
+cos_criterion.cuda()
 
 # --------- load a dataset ------------------------------------
 train_data, test_data = utils.load_dataset(opt)
@@ -584,12 +589,14 @@ def train_overall(x):
     
     # content preserve loss
     preserve = train_preserve(x)
+#     preserve_loss = 0.1 * preserve
     
     # backward
 #     loss = mse + pose_recon + kld*opt.beta + preserve
     loss = mse + pose_recon + kld*opt.beta
     
     loss.backward(retain_graph=True)
+#     loss.backward()
     content_lstm_optimizer.step()
     encoder_c_optimizer.step()
     
@@ -639,13 +646,17 @@ def train_preserve(x):
             vec_in = vec_p_seq[i - 1]
         else:
             vec_in = torch.zeros_like(vec_p)
-        vec_p_recon = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
+        vec_p_recon = frame_predictor(torch.cat([vec_p_global, vec_in], 1)).detach()
         
         if i >= opt.n_past:
             x_pred = decoder([torch.cat([vec_c_fix, vec_p_recon], 1), skip_fix])
             vec_c, _ = encoder_c(x_pred)
             vec_c_pred = content_lstm(vec_c)
+#             if (i+1) % opt.n_past == 0:
             preserve += mse_criterion(vec_c_pred, vec_c_fix)
+#             target_shape = vec_c_pred.shape
+#             target = torch.ones(target_shape[0], 1).cuda()
+#             preserve += cos_criterion(vec_c_pred, vec_c_fix, target)
     
 #     loss = preserve
 #     loss.backward()

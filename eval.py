@@ -24,6 +24,8 @@ parser.add_argument('--nsample', type=int, default=100, help='number of samples'
 parser.add_argument('--N', type=int, default=256, help='number of samples')
 
 opt = parser.parse_args()
+opt.log_dir = os.path.join(opt.model_path, 'plots')
+opt.model_path = os.path.join(opt.model_path, 'model.pth')
 os.makedirs('%s' % opt.log_dir, exist_ok=True)
 
 opt.n_eval = opt.n_past+opt.n_future
@@ -247,7 +249,7 @@ def make_gifs(x, idx, name):
 
         fname = '%s/%s_%d.gif' % (opt.log_dir, name, idx+i) 
         utils.save_gif_with_text(fname, gifs, text, 1)
-    return ssim
+    return ssim, np.array(all_log)
 
 def add_border(x, color, pad=1):
     w = x.size()[1]
@@ -265,14 +267,22 @@ def add_border(x, color, pad=1):
     return px
 
 mean_ssim = 0
+mean_cos = 0
 for i in range(0, opt.N, opt.batch_size):
     # plot test
     print(i)
     with torch.no_grad():
         test_x = next(testing_batch_generator)
-        ssim = make_gifs(test_x, i, 'test')
-    mean_ssim += ssim.mean()
+        ssim, cos = make_gifs(test_x, i, 'test')
+    # ssim : (batch, sample, timestep)
+    # cos : (sample, timestep, batch)
+    mean_ssim += np.mean(ssim, axis=(0, 1))
+    mean_cos += np.mean(cos, axis=(0, 2))
 mean_ssim = mean_ssim / (opt.N // opt.batch_size)
+mean_cos = mean_cos / (opt.N // opt.batch_size)
 
+print(mean_ssim.shape)
 print(mean_ssim)
-    
+print(mean_cos.shape)
+print(mean_cos)
+
