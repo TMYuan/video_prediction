@@ -166,6 +166,7 @@ def make_gifs(x, idx, name):
     psnr = np.zeros((opt.batch_size, nsample, opt.n_future))
     all_gen = []
     all_log = []
+    all_mse = []
     for s in tqdm(range(nsample), desc='sample'):
         gen_seq = []
         gt_seq = []
@@ -174,6 +175,7 @@ def make_gifs(x, idx, name):
         content_lstm.hidden = content_lstm.init_hidden()
         all_gen.append([])
         all_log.append([])
+        all_mse.append([])
         
         for i in range(opt.n_past):
             vec_c, _ = encoder_c(x[i])
@@ -193,6 +195,7 @@ def make_gifs(x, idx, name):
                 _ = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
                 all_gen[s].append(x[i])
                 all_log[s].append(F.cosine_similarity(vec_c_global.squeeze(), vec_c_global.squeeze()).data.cpu().numpy())
+                all_mse[s].append(F.mse_loss(vec_c_global.squeeze(), vec_c_global.squeeze()).data.cpu().numpy())
             else:
                 vec_in, _ = encoder_p(all_gen[s][-1], vec_c_global)
                 h = frame_predictor(torch.cat([vec_p_global, vec_in], 1))
@@ -201,11 +204,13 @@ def make_gifs(x, idx, name):
                 vec_c_pred, _ = encoder_c(x_pred)
                 vec_c_g_pred = content_lstm(vec_c_pred)
                 cos_sim = F.cosine_similarity(vec_c_g_pred.squeeze(), vec_c_global.squeeze())
+                mse = F.mse_loss(vec_c_g_pred, vec_c_global)
 
                 gen_seq.append(x_pred.data.cpu().numpy())
                 gt_seq.append(x[i].data.cpu().numpy())
                 all_gen[s].append(x_pred)
                 all_log[s].append(cos_sim.data.cpu().numpy())
+                all_mse[s].append(mse.data.cpu().numpy())
         _, ssim[:, s, :], psnr[:, s, :] = utils.eval_seq(gt_seq, gen_seq)
 
 
@@ -249,7 +254,7 @@ def make_gifs(x, idx, name):
 
         fname = '%s/%s_%d.gif' % (opt.log_dir, name, idx+i) 
         utils.save_gif_with_text(fname, gifs, text, 1)
-    return ssim, np.array(all_log)
+    return ssim, np.array(all_log), np.array(all_mse)
 
 def add_border(x, color, pad=1):
     w = x.size()[1]
@@ -268,21 +273,28 @@ def add_border(x, color, pad=1):
 
 mean_ssim = 0
 mean_cos = 0
+mean_mse = 0
 for i in range(0, opt.N, opt.batch_size):
     # plot test
     print(i)
     with torch.no_grad():
         test_x = next(testing_batch_generator)
-        ssim, cos = make_gifs(test_x, i, 'test')
+        ssim, cos, mse = make_gifs(test_x, i, 'test')
+    
     # ssim : (batch, sample, timestep)
     # cos : (sample, timestep, batch)
+    # mse : (sample, timestep, batch, dim)
     mean_ssim += np.mean(ssim, axis=(0, 1))
     mean_cos += np.mean(cos, axis=(0, 2))
+    mean_mse += np.mean(mse, axis=0)
 mean_ssim = mean_ssim / (opt.N // opt.batch_size)
 mean_cos = mean_cos / (opt.N // opt.batch_size)
+mean_mse = mean_mse / (opt.N // opt.batch_size)
 
 print(mean_ssim.shape)
 print(mean_ssim)
 print(mean_cos.shape)
 print(mean_cos)
+print(mean_mse.shape)
+print(mean_mse)
 
