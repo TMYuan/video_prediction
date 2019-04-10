@@ -207,7 +207,11 @@ def mse_metric(x1, x2):
     err /= float(x1.shape[0] * x1.shape[1] * x1.shape[2])
     return err
 
-def eval_seq(gt, pred):
+def eval_seq(gt_seq, pred_seq, length):
+    gt = [gt_i.data.cpu().numpy() for gt_i in gt_seq]
+    pred = [pred_i.data.cpu().numpy() for pred_i in pred_seq]
+    gt = gt[-length:]
+    pred = pred[-length:]
     T = len(gt)
     bs = gt[0].shape[0]
     ssim = np.zeros((bs, T))

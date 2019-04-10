@@ -65,7 +65,7 @@ if opt.model_dir != '':
     opt.niter = niter
     opt.epoch_size = epoch_size
     opt.batch_size = batch_size
-    opt.log_dir = '%s/0328_CP_discriminator_version' % opt.log_dir
+    opt.log_dir = '%s/0402_old_discriminator_newcode_ver' % opt.log_dir
 else:
     name = 'model=%s%dx%d-rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%d-beta=%.7f%s' % (opt.model, opt.image_width, opt.image_width, opt.rnn_size, opt.predictor_rnn_layers, opt.posterior_rnn_layers, opt.n_past, opt.n_future, opt.lr, opt.g_dim, opt.z_dim, opt.last_frame_skip, opt.beta, opt.name)
     if opt.dataset == 'smmnist':

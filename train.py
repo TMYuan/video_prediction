@@ -113,6 +113,7 @@ else:
     
 ## Load/Create model
 if opt.model_dir != '':
+    print('Load Pretrain Model')
     decoder_lstm = saved_model['decoder_lstm']
     content_lstm = saved_model['content_lstm']
     encoder_lstm = saved_model['encoder_lstm']
@@ -120,6 +121,7 @@ if opt.model_dir != '':
     encoder_p = saved_model['encoder_p']
     encoder_c = saved_model['encoder_c']
 else:
+    print('Train the model from scratch')
     decoder_lstm = lstm_models.lstm_new(opt.z_dim+opt.g_dim, opt.g_dim, opt.rnn_size, opt.predictor_rnn_layers, opt.batch_size)
     content_lstm = lstm_models.lstm_new(opt.g_dim, opt.g_dim, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
     encoder_lstm = lstm_models.gaussian_lstm_new(opt.g_dim, opt.z_dim, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
@@ -143,7 +145,8 @@ encoder_c_optimizer = opt.optimizer(encoder_c.parameters(), lr=opt.lr, betas=(op
 decoder_optimizer = opt.optimizer(decoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
 
-discriminator = D.lstm_new(opt.g_dim, 1, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
+# discriminator = D.lstm_new(opt.g_dim, 1, opt.rnn_size, opt.posterior_rnn_layers, opt.batch_size)
+discriminator = D.discriminator(opt.g_dim)
 discriminator.apply(utils.init_weights)
 discriminator_optimizer = opt.optimizer(discriminator.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 discriminator.cuda()
@@ -212,7 +215,7 @@ def forward_content_branch(x):
     Return: (vec_c_seq, vec_c_global, skip connection)
     """
     vec_c_seq = [encoder_c(x[i])[0] for i in range(len(x))]
-    skip = encoder_c(x[opt.n_past - 1])[1]
+    skip = encoder_c(x[-1])[1]
     vec_c_global = content_lstm(vec_c_seq, return_last=True)[0]
     return (vec_c_seq, vec_c_global, skip)
 
@@ -224,13 +227,14 @@ def forward_pose_encoder_branch(x, vec_c_global, detach=False, local_only=False)
     """
     vec_p_seq = [encoder_p(x[i], vec_c_global)[0] for i in range(len(x))]
     
-    if detach:
-        vec_p_seq = [vec_p.detach() for vec_p in vec_p_seq]
-    
     if local_only:
         return vec_p_seq
     else:
-        vec_p_global, mu, var = encoder_lstm(vec_p_seq)
+        if detach:
+            vec_p_seq_d = [vec_p.detach() for vec_p in vec_p_seq]
+        else:
+            vec_p_seq_d = vec_p_seq
+        vec_p_global, mu, var = encoder_lstm(vec_p_seq_d)
         return (vec_p_seq, vec_p_global, mu, var)
     
 ## Forward function for decoder part in pose branch
@@ -325,14 +329,13 @@ def train_posevae(x):
     
     # generate content vector in each time step and produce global content vector
     vec_c_seq, vec_c_global, skip = forward_content_branch(x[:opt.n_past])
-    vec_c_global = vec_c_global.detach()
-    skip = [s.detach() for s in skip]
     
     # Generate pose vector for each time step
     vec_p_seq, vec_p_global, mu, var = forward_pose_encoder_branch(x, vec_c_global, detach=True)
     kld += kl_criterion(mu, var)
     
     # train decoder part(pose lstm decoder & frame decoder)
+    vec_p_seq = [vec_p.detach() for vec_p in vec_p_seq]
     vec_p_recon_seq = forward_pose_decoder_branch(vec_p_seq, vec_p_global)
     
     # calculate pose reconstruction loss
@@ -366,43 +369,62 @@ def train_overall(x):
     kld = 0
     pose_recon = 0
     preserve = 0
-    loss_G = 0
+    loss_g = 0
+    loss_c = 0
     
     # generate content vector in each time step and produce global content vector
     vec_c_seq, vec_c_global, skip = forward_content_branch(x[:opt.n_past])
     
     # KLD loss for pose vae
-    vec_p_seq, vec_p_global, mu, var = forward_pose_encoder_branch(x, vec_c_global)
+    vec_p_seq, vec_p_global, mu, var = forward_pose_encoder_branch(x, vec_c_global, detach=True)
     kld += kl_criterion(mu, var)
     
     # pose reconstruction loss
-    vec_p_recon_seq = forward_pose_decoder_branch(vec_p_seq, vec_p_global)
-    for (recon, target) in zip(vec_p_recon_seq, vec_p_seq):
+    # only update pose encoder LSTM
+    # use detach to prevent update pose encoder
+    vec_p_seq_d = [vec_p.detach() for vec_p in vec_p_seq]
+    vec_p_recon_seq = forward_pose_decoder_branch(vec_p_seq_d, vec_p_global)
+    for (recon, target) in zip(vec_p_recon_seq, vec_p_seq_d):
         pose_recon += mse_criterion(recon, target)
 
     # image reconstruction loss
+    # re-generate "vec_p_recon_seq" by not detach from pose vector
+    vec_p_recon_seq = forward_pose_decoder_branch(vec_p_seq, vec_p_global)
     x_pred_list = forward_decoder(vec_p_recon_seq, vec_c_global, skip)
     for (pred, gt) in zip(x_pred_list, x):
         mse += mse_criterion(pred, gt)
-        
-    # adversarial loss for generator
-    out_D = forward_discriminator(x_pred_list)
-    loss_G = -torch.mean(out_D)
     
-    loss_all_model = mse + loss_G
-    loss_pose_vae = pose_recon + opt.beta*kld
+    # content discriminator loss: maximize entropy of output for pose vector
+    target = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.5)
+    for vec_1 in vec_p_seq:
+        for vec_2 in vec_p_seq_d:
+            out = discriminator([vec_1, vec_2])
+            loss_g += bce_criterion(out, target)
+    loss_g = loss_g / (len(vec_p_seq)**2)
     
-    loss_all_model.backward(retain_graph=True)
+    # content discriminator loss: minimize entropy of output for content vector
+    target = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(1.0)
+    vec_c_seq_d = [vec_c.detach() for vec_c in vec_c_seq]
+    for vec_1 in vec_c_seq:
+        for vec_2 in vec_c_seq_d:
+            out = discriminator([vec_1, vec_2])
+            loss_c += bce_criterion(out, target)
+    loss_c = loss_c / (len(vec_c_seq)**2)
+    
+    
+#     loss_all_model = mse + loss_G + pose_recon + opt.beta*kld
+    loss_all_model = mse + pose_recon + opt.beta*kld + 0.1*loss_g + 0.1*loss_c
+    
+    loss_all_model.backward()
     content_lstm_optimizer.step()
     encoder_c_optimizer.step()
     encoder_p_optimizer.step()
     decoder_optimizer.step()
     
-    loss_pose_vae.backward()
     encoder_lstm_optimizer.step()
     decoder_lstm_optimizer.step()
     
-    return mse.item()/(opt.n_past+opt.n_future), kld.item(), pose_recon.item()/(opt.n_past+opt.n_future), loss_G.item()
+    return mse.item()/(opt.n_past+opt.n_future), kld.item(), pose_recon.item()/(opt.n_past+opt.n_future), loss_g.item(), loss_c.item()
 
 def train_D(x):
     """
@@ -432,6 +454,50 @@ def train_D(x):
         p.data.clamp_(-opt.clip_value, opt.clip_value)
         
     return loss_d.item()
+
+def train_content_disc(x):
+    """
+    Training function for content discriminator
+    """
+    discriminator.zero_grad()
+
+    loss_d = 0
+    total_number = 0
+    acc = 0
+    target = torch.cuda.FloatTensor(opt.batch_size, 1)
+    half = opt.batch_size//2
+    target[:half] = 0
+    target[half:] = 1
+    
+    _, vec_c_x, _ = forward_content_branch(x[:opt.n_past])
+    vec_c_x = vec_c_x.detach()
+    
+    vec_x_seq = forward_pose_encoder_branch(x, vec_c_x, local_only=True)
+    vec_x_seq = [vec_x.detach() for vec_x in vec_x_seq]
+    
+    for vec_1 in vec_x_seq:
+        for vec_2 in vec_x_seq:
+            rp = torch.randperm(half).cuda()
+            vec_clone = torch.zeros_like(vec_2)
+            vec_clone.copy_(vec_2)
+            vec_clone[:half] = vec_clone[rp]
+            
+            out = discriminator([vec_1, vec_clone])
+            
+            total_number += opt.batch_size
+            acc += out[:half].le(0.5).sum() + out[half:].gt(0.5).sum()
+            loss_d += bce_criterion(out, target)
+            
+    loss_d = loss_d / (len(vec_x_seq)**2)
+    
+    loss_d.backward()
+    discriminator_optimizer.step()
+    
+    # Clip weights of discriminator
+    for p in discriminator.parameters():
+        p.data.clamp_(-opt.clip_value, opt.clip_value)
+    
+    return loss_d.item(), acc.data.cpu().numpy()/total_number
 
 # Plot functions
 ## plot reconstructed results
@@ -481,7 +547,7 @@ def plot(x, epoch, prefix=''):
             else:
                 vec_in = encoder_p(gen_seq[s][-1], vec_c_global)[0]
                 vec_in = torch.cat([vec_p_global, vec_in], 1)
-                vec_p_seq, hidden = decoder_lstm([vec_in])
+                vec_p_seq, hidden = decoder_lstm([vec_in], hidden=hidden)
                 x_pred = decoder([torch.cat([vec_c_global, vec_p_seq[0]], 1), skip])
                 gen_seq[s].append(x_pred)
 
@@ -585,50 +651,55 @@ def training_loop():
         epoch_swap_mse = 0
         epoch_loss_d = 0
         epoch_loss_g = 0
+        epoch_acc_d = 0
+        epoch_loss_c = 0
 
         for i in tqdm(range(opt.epoch_size), desc='BATCH'):
             x = next(training_batch_generator)
 
             # train disc.
-            epoch_loss_d += train_D(x)
-
+            loss_d, acc_d = train_content_disc(x)
+            epoch_loss_d += loss_d
+            epoch_acc_d += acc_d
+            
             # train generator
-            mse, kld, pose_recon, loss_g = train_overall(x)
+            mse, kld, pose_recon, loss_g, loss_c = train_overall(x)
             epoch_mse += mse
             epoch_kld += kld
             epoch_pose_recon += pose_recon
             epoch_loss_g += loss_g
+            epoch_loss_c += loss_c
 
-
-        print('[%02d] mse loss: %.5f | kld loss: %.5f | pose recon loss: %.5f | loss_d: %.5f | loss_g: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_pose_recon/opt.epoch_size, epoch_loss_d/opt.epoch_size, epoch_loss_g/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+#         print('[%02d] mse loss: %.5f | kld loss: %.5f | pose recon loss: %.5f | loss_d: %.5f | loss_g: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_pose_recon/opt.epoch_size, epoch_loss_d/opt.epoch_size, epoch_loss_g/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+        print('[%02d]mse loss: %.5f |kld loss: %.5f |pose recon loss: %.5f |loss_g: %.5f |loss_c: %.5f |loss_d: %.5f |acc_d: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_kld/opt.epoch_size, epoch_pose_recon/opt.epoch_size, epoch_loss_g/opt.epoch_size, epoch_loss_c/opt.epoch_size, epoch_loss_d/opt.epoch_size, epoch_acc_d/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
         
         """
         Make Visualization
         """
-        content_lstm.eval()
-        encoder_c.eval()
-        encoder_p.eval()
-        decoder.eval()
-        encoder_lstm.eval()
-        decoder_lstm.eval()
-        
-        x = next(testing_batch_generator)
-        with torch.no_grad():
-            plot_rec(x, epoch, 'NORMAL')
-            plot(x, epoch, 'NORMAL')
-        # save the model
-        torch.save({
-            'encoder_p': encoder_p,
-            'encoder_c': encoder_c,
-            'decoder': decoder,
-            'frame_predictor': frame_predictor,
-            'posterior': posterior,
-            'content_lstm': content_lstm,
-            'opt': opt
-        }, '%s/model.pth' % opt.log_dir)
-        if epoch % 10 == 0:
+        if (epoch+1) % 10 == 0:
             print('log dir: %s' % opt.log_dir)
-            
+            content_lstm.eval()
+            encoder_c.eval()
+            encoder_p.eval()
+            decoder.eval()
+            encoder_lstm.eval()
+            decoder_lstm.eval()
 
-pre_training_loop()
+            x = next(testing_batch_generator)
+            with torch.no_grad():
+                plot_rec(x, epoch, 'NORMAL')
+                plot(x, epoch, 'NORMAL')
+            # save the model
+            torch.save({
+                'encoder_p': encoder_p,
+                'encoder_c': encoder_c,
+                'decoder': decoder,
+                'encoder_lstm': encoder_lstm,
+                'decoder_lstm': decoder_lstm,
+                'content_lstm': content_lstm,
+                'opt': opt
+            }, '%s/model.pth' % opt.log_dir)
+            
+if opt.pretrain:
+    pre_training_loop()
 training_loop()
