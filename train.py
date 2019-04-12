@@ -44,6 +44,7 @@ parser.add_argument('--num_digits', type=int, default=2, help='number of digits 
 parser.add_argument('--last_frame_skip', action='store_true', help='if true, skip connections go between frame t and frame t+t rather than last ground truth frame')
 parser.add_argument('--pretrain', action='store_true', help='if true, train model without teporary first')
 parser.add_argument('--clip_value', type=float, default=0.01, help='lower and upper clip value for disc. weights')
+parser.add_argument('--threshold', type=float, default=0.9, help='ratio of teacher input')
 
 opt = parser.parse_args()
 if opt.model_dir != '':
@@ -57,6 +58,7 @@ if opt.model_dir != '':
     epoch_size = opt.epoch_size
     batch_size = opt.batch_size
     log_dir = opt.log_dir
+    threshold = opt.threshold
     opt = saved_model['opt']
     opt.optimizer = optimizer
     opt.model_dir = model_dir
@@ -67,6 +69,7 @@ if opt.model_dir != '':
     opt.epoch_size = epoch_size
     opt.batch_size = batch_size
     opt.log_dir = log_dir
+    opt.threshold = threshold
 else:
     name = 'model=%s%dx%d-rnn_size=%d-predictor-posterior-rnn_layers=%d-%d-n_past=%d-n_future=%d-lr=%.4f-g_dim=%d-z_dim=%d-last_frame_skip=%d-beta=%.7f%s' % (opt.model, opt.image_width, opt.image_width, opt.rnn_size, opt.predictor_rnn_layers, opt.posterior_rnn_layers, opt.n_past, opt.n_future, opt.lr, opt.g_dim, opt.z_dim, opt.last_frame_skip, opt.beta, opt.name)
     if opt.dataset == 'smmnist':
@@ -266,6 +269,37 @@ def forward_decoder(vec_p_seq, vec_c_global, skip):
         x_pred_list.append(x_pred)
     return x_pred_list
 
+## Modified forward function for decoder LSTM + decoder
+def forward_decoder_part(vec_p_seq, vec_p_global, vec_c_global, skip, threshold, detach=False, return_pred=True):
+    """
+    Input: pose vec sequence, global pose vector, global content vector, skip connection, threshold
+    Output: reconstructed pose vector sequence, predicted frame sequence
+    """
+    vec_p_recon_seq = []
+    x_pred_list = []
+    hidden = None
+    for i in range(len(vec_p_seq)):
+        if i > 0:
+            rand_num = np.random.random_sample()
+            if rand_num >= threshold:
+                vec_in = encoder_p(x_pred_list[-1], vec_c_global)[0]
+            else:
+                vec_in = vec_p_seq[i - 1]
+        else:
+            vec_in = torch.zeros_like(vec_p_seq[0])
+        
+        if detach:
+            vec_in = vec_in.detach()
+        vec_p_recon, hidden = decoder_lstm([torch.cat([vec_p_global, vec_in], 1)], hidden=hidden)
+        vec_p_recon_seq.append(vec_p_recon[0])
+        
+        x_pred = decoder([torch.cat([vec_c_global, vec_p_recon[0]], 1), skip])
+        x_pred_list.append(x_pred)
+    if return_pred:        
+        return x_pred_list
+    else:
+        return vec_p_recon_seq
+
 ## Forward function for discriminator
 def forward_discriminator(x):
     """
@@ -383,14 +417,13 @@ def train_overall(x):
     # only update pose encoder LSTM
     # use detach to prevent update pose encoder
     vec_p_seq_d = [vec_p.detach() for vec_p in vec_p_seq]
-    vec_p_recon_seq = forward_pose_decoder_branch(vec_p_seq_d, vec_p_global)
+    vec_p_recon_seq = forward_decoder_part(vec_p_seq_d, vec_p_global, vec_c_global, skip, opt.threshold, detach=True, return_pred=False)
     for (recon, target) in zip(vec_p_recon_seq, vec_p_seq_d):
         pose_recon += mse_criterion(recon, target)
 
     # image reconstruction loss
     # re-generate "vec_p_recon_seq" by not detach from pose vector
-    vec_p_recon_seq = forward_pose_decoder_branch(vec_p_seq, vec_p_global)
-    x_pred_list = forward_decoder(vec_p_recon_seq, vec_c_global, skip)
+    x_pred_list = forward_decoder_part(vec_p_seq, vec_p_global, vec_c_global, skip, opt.threshold)
     for (pred, gt) in zip(x_pred_list, x):
         mse += mse_criterion(pred, gt)
     
@@ -634,6 +667,8 @@ def training_loop():
     for epoch in tqdm(range(opt.niter), desc='EPOCH'):
         if (epoch+1) % 50 == 0:
             opt.beta *= 10
+        if (epoch+1) % 20 == 0:
+            opt.threshold -= 0.1
 
         content_lstm.train()
         encoder_c.train()

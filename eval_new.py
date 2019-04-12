@@ -260,7 +260,7 @@ def make_gifs(x, idx, name):
                 text[t].append('Random %d\n %.4f' % (s+1, all_log[s][t][i]))
 
         fname = '%s/%s_%d.gif' % (opt.log_dir, name, idx+i) 
-        utils.save_gif_with_text(fname, gifs, text, 1)
+        utils.save_gif_with_text(fname, gifs, text, 0.5)
     return ssim, np.array(all_log), np.array(all_mse)
 
 def add_border(x, color, pad=1):
