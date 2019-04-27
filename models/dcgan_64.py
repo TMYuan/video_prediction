@@ -75,36 +75,55 @@ class encoder(nn.Module):
 
 
 class decoder(nn.Module):
-    def __init__(self, dim, nc=1):
+    def __init__(self, dim, nc=1, skip=True):
         super(decoder, self).__init__()
         self.dim = dim
         nf = 64
         self.upc1 = nn.Sequential(
-                # input is Z, going into a convolution
-                nn.ConvTranspose2d(dim, nf * 8, 4, 1, 0),
-                nn.BatchNorm2d(nf * 8),
-#                 nn.InstanceNorm2d(nf * 8, affine=True),
-                nn.LeakyReLU(0.2, inplace=True)
-                )
-        # state size. (nf*8) x 4 x 4
-        self.upc2 = dcgan_upconv(nf * 8 * 2, nf * 4)
-        # state size. (nf*4) x 8 x 8
-        self.upc3 = dcgan_upconv(nf * 4 * 2, nf * 2)
-        # state size. (nf*2) x 16 x 16
-        self.upc4 = dcgan_upconv(nf * 2 * 2, nf)
-        # state size. (nf) x 32 x 32
-        self.upc5 = nn.Sequential(
+            # input is Z, going into a convolution
+            nn.ConvTranspose2d(dim, nf * 8, 4, 1, 0),
+            nn.BatchNorm2d(nf * 8),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
+        if skip:
+            # state size. (nf*8) x 4 x 4
+            self.upc2 = dcgan_upconv(nf * 8 * 2, nf * 4)
+            # state size. (nf*4) x 8 x 8
+            self.upc3 = dcgan_upconv(nf * 4 * 2, nf * 2)
+            # state size. (nf*2) x 16 x 16
+            self.upc4 = dcgan_upconv(nf * 2 * 2, nf)
+            # state size. (nf) x 32 x 32
+            self.upc5 = nn.Sequential(
                 nn.ConvTranspose2d(nf * 2, nc, 4, 2, 1),
                 nn.Sigmoid()
                 # state size. (nc) x 64 x 64
-                )
+            )
+        else:
+            # state size. (nf*8) x 4 x 4
+            self.upc2 = dcgan_upconv(nf * 8, nf * 4)
+            # state size. (nf*4) x 8 x 8
+            self.upc3 = dcgan_upconv(nf * 4, nf * 2)
+            # state size. (nf*2) x 16 x 16
+            self.upc4 = dcgan_upconv(nf * 2, nf)
+            # state size. (nf) x 32 x 32
+            self.upc5 = nn.Sequential(
+                nn.ConvTranspose2d(nf, nc, 4, 2, 1),
+                nn.Sigmoid()
+                # state size. (nc) x 64 x 64
+            )
 
-    def forward(self, input):
-        vec, skip = input 
-        d1 = self.upc1(vec.view(-1, self.dim, 1, 1))
-        d2 = self.upc2(torch.cat([d1, skip[3]], 1))
-        d3 = self.upc3(torch.cat([d2, skip[2]], 1))
-        d4 = self.upc4(torch.cat([d3, skip[1]], 1))
-        output = self.upc5(torch.cat([d4, skip[0]], 1))
+    def forward(self, vec, skip=None):
+        if skip is not None:
+            d1 = self.upc1(vec.view(-1, self.dim, 1, 1))
+            d2 = self.upc2(torch.cat([d1, skip[3]], 1))
+            d3 = self.upc3(torch.cat([d2, skip[2]], 1))
+            d4 = self.upc4(torch.cat([d3, skip[1]], 1))
+            output = self.upc5(torch.cat([d4, skip[0]], 1))
+        else:
+            d1 = self.upc1(vec.view(-1, self.dim, 1, 1))
+            d2 = self.upc2(d1)
+            d3 = self.upc3(d2)
+            d4 = self.upc4(d3)
+            output = self.upc5(d4)
         return output
 

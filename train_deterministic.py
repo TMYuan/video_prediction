@@ -124,7 +124,7 @@ else:
     print('Train the model from scratch')
     encoder_p = model.encoder(opt.g_dim, opt.channels, conditional=True)
     encoder_c = model.encoder(opt.g_dim, opt.channels, conditional=False)
-    decoder = model.decoder(opt.g_dim + opt.g_dim, opt.channels)
+    decoder = model.decoder(opt.g_dim + opt.g_dim, opt.channels, skip=False)
     
     encoder_p.apply(utils.init_weights)
     encoder_c.apply(utils.init_weights)
@@ -135,12 +135,10 @@ encoder_p_optimizer = opt.optimizer(encoder_p.parameters(), lr=opt.lr, betas=(op
 encoder_c_optimizer = opt.optimizer(encoder_c.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 decoder_optimizer = opt.optimizer(decoder.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
 
-"""
-TODO: Change structure of discriminator
-"""
-discriminator = D.discriminator(opt.g_dim)
+
+discriminator = D.content_disc(opt.g_dim)
 discriminator.apply(utils.init_weights)
-discriminator_optimizer = opt.optimizer(discriminator.parameters(), lr=opt.lr, betas=(opt.beta1, 0.999))
+discriminator_optimizer = opt.optimizer(discriminator.parameters(), lr=0.1*opt.lr, betas=(opt.beta1, 0.999))
 discriminator.cuda()
 
 ## Loss function
@@ -198,9 +196,8 @@ def forward_content_encoder(x):
     Return: (vec_c_seq, vec_c_global, skip connection)
     """
     vec_c_seq = [encoder_c(x[i])[0] for i in range(len(x))]
-    skip_seq = [encoder_c(x[i])[1] for i in range(len(x))]
     
-    return vec_c_seq, skip_seq
+    return vec_c_seq
 
 ## Forward function for encoder part in pose branch
 def forward_pose_encoder(x, vec_c_seq):
@@ -213,17 +210,25 @@ def forward_pose_encoder(x, vec_c_seq):
     return vec_p_seq
     
 ## Forward function for decoder
-def forward_decoder(vec_p_seq, vec_c_seq, skip_seq):
+def forward_decoder(vec_p_seq, vec_c_seq):
     """
     Input: pose vec sequence, content vec sequence, skip sequence
     Return: list of predicted frames
     """
     x_pred_list = []
-    for vec_p, vec_c, skip in zip(vec_p_seq, vec_c_seq, skip_seq):
-        x_pred = decoder([torch.cat([vec_c, vec_p], 1), skip])
+    for vec_p, vec_c in zip(vec_p_seq, vec_c_seq):
+        x_pred = decoder(torch.cat([vec_c, vec_p], 1))
         x_pred_list.append(x_pred)
     
     return x_pred_list
+
+## Forward function for discriminator
+def forward_discriminator(x1, x2):
+    """
+    Input: x1 and x2
+    """
+    out = discriminator(x1, x2)
+    return out
 
 ## train deterministic part funtions
 def train_deterministic(x):
@@ -234,29 +239,228 @@ def train_deterministic(x):
     encoder_p.zero_grad()
     encoder_c.zero_grad()
     decoder.zero_grad()
-    discriminator.zero_grad()
     
     # log variable
     mse = 0
     loss_G = 0
     
     # generate content vector seq and skip seq
-    vec_c_seq, skip_seq = forward_content_encoder(x)
+    vec_c_seq = forward_content_encoder(x)
     
     # generate pose vector in each time step
     vec_p_seq = forward_pose_encoder(x, vec_c_seq)
     
     # reconstruction
-    x_pred_list = forward_decoder(vec_p_seq, vec_c_seq, skip_seq)
+    x_pred_list = forward_decoder(vec_p_seq, vec_c_seq)
+    
+    # content consistency loss
+    rn = torch.randperm(len(x))
+    loss_content = mse_criterion(vec_c_seq[rn[0]], vec_c_seq[rn[1]])
     
     # reconstruction loss
     for (pred, gt) in zip(x_pred_list, x):
         mse += mse_criterion(pred, gt)
-        
+    
     # Swap the training data to generate different pose
-    rp = torch.randperm(opt.batch_size).cuda()
+#     target = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(1.)
+#     vec_p_swap = []
+#     rp = torch.randperm(opt.batch_size).cuda()
+#     for vec_p in vec_p_seq:
+#         vec_swap = torch.zeros_like(vec_p)
+#         vec_swap.copy_(vec_p)
+#         vec_swap = vec_swap[rp]
+#         vec_p_swap.append(vec_swap)
+    
+    # generate images from swapped pose vector and original content vector
+#     x_swap_list = forward_decoder(vec_p_swap, vec_c_seq)
+    
+#     """
+#     Forward x_swap_list in discriminator
+#     """
+#     rn = torch.randperm(len(x))
+#     # pick two different time steps of x_swap as pair
+#     x_swap = forward_decoder([vec_p_swap[rn[0]]], [vec_c_seq[rn[0]]])[0]
+#     out = forward_discriminator(x_swap, x[rn[1]])
+#     loss_G = bce_criterion(out, target)
+    
+#     loss = mse + loss_content + 0.1 * loss_G
+    loss = mse + loss_content
+    loss.backward()
+    
+    encoder_p_optimizer.step()
+    encoder_c_optimizer.step()
+    decoder_optimizer.step()
+    
+#     return mse.item()/(opt.n_past+opt.n_future), loss_content.item(), loss_G.item()
+    return mse.item()/(opt.n_past+opt.n_future), loss_content.item()
+
+def train_swap(x):
+    # zero_grad
+    encoder_p.zero_grad()
+    encoder_c.zero_grad()
+    decoder.zero_grad()
+    
+    # log variable
+    loss_G = 0
+    
+    # generate content vector seq
+    vec_c_seq = forward_content_encoder(x)
+    
+    # generate pose vector in each time step
+    vec_p_seq = forward_pose_encoder(x, vec_c_seq)
+    
     vec_p_swap = []
+    rp = torch.randperm(opt.batch_size).cuda()
     for vec_p in vec_p_seq:
         vec_swap = torch.zeros_like(vec_p)
         vec_swap.copy_(vec_p)
         vec_swap = vec_swap[rp]
+        vec_p_swap.append(vec_swap)
+    
+    target = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(1.)
+    rn = torch.randperm(len(x))
+    # pick two different time steps of x_swap as pair
+    x_swap = forward_decoder([vec_p_swap[rn[0]]], [vec_c_seq[rn[0]]])[0]
+    out = forward_discriminator(x_swap, x[rn[1]])
+    loss_G = 0.01 * bce_criterion(out, target)
+    
+    loss_G.backward()
+    encoder_p_optimizer.step()
+    encoder_c_optimizer.step()
+    decoder_optimizer.step()
+    
+    return loss_G.item()
+
+## train discriminator function
+def train_discriminator(x):
+    """
+    Train discriminator
+    """
+    discriminator.zero_grad()
+    
+    loss_D = 0
+    
+    target_0 = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(0.)
+    target_1 = torch.cuda.FloatTensor(opt.batch_size, 1).fill_(1.)
+    
+    real_x = x
+    
+    fake_x = []
+    for x_i in x:
+        rp = torch.randperm(opt.batch_size).cuda()
+        x_f = torch.zeros_like(x_i)
+        x_f.copy_(x_i)
+        x_f = x_f[rp]
+        fake_x.append(x_f)
+    
+    with torch.no_grad():
+        swap_x = []
+        vec_c_seq = forward_content_encoder(x)
+        vec_p_seq = forward_pose_encoder(x, vec_c_seq)
+        vec_p_swap = []
+        rp = torch.randperm(opt.batch_size).cuda()
+        for vec_p in vec_p_seq:
+            vec_swap = torch.zeros_like(vec_p)
+            vec_swap.copy_(vec_p)
+            vec_swap = vec_swap[rp]
+            vec_p_swap.append(vec_swap)
+        # generate images from swapped pose vector and original content vector
+        swap_x = forward_decoder(vec_p_swap, vec_c_seq)
+    
+    
+    rn = torch.randperm(len(real_x))
+    out_r = forward_discriminator(real_x[rn[0]], real_x[rn[1]])
+    out_f = forward_discriminator(fake_x[rn[0]], fake_x[rn[1]])
+    out_s = forward_discriminator(swap_x[rn[0]].detach(), real_x[rn[1]])
+#     print('out_r: {}'.format(out_r))
+#     print('out_f: {}'.format(out_f))
+#     print('out_s: {}'.format(out_s))
+
+
+    acc = out_r.gt(0.5).sum() + out_f.le(0.5).sum() + out_s.le(0.5).sum()
+#     acc = out_r.gt(0.5).sum() + out_f.le(0.5).sum()
+    acc = acc.data.cpu().numpy()
+    acc = acc / (3*opt.batch_size)
+    loss_D = 0.5 * bce_criterion(out_r, target_1) + 0.25 * bce_criterion(out_f, target_0) + 0.25 * bce_criterion(out_s, target_0)
+#     loss_D = 0.5 * bce_criterion(out_r, target_1) + 0.5 * bce_criterion(out_f, target_0)
+    
+    loss_D.backward()
+    discriminator_optimizer.step()
+    
+    # Clip weights of discriminator
+#     for p in discriminator.parameters():
+#         p.data.clamp_(-opt.clip_value, opt.clip_value)
+
+    return loss_D.item(), acc
+
+# Plot functions
+## plot reconstructed results
+def plot_rec(x, epoch, prefix=''):
+    gen_seq = []
+    vec_c_seq = forward_content_encoder(x)
+    vec_p_seq = forward_pose_encoder(x, vec_c_seq)
+    x_pred_list = forward_decoder(vec_p_seq, vec_c_seq)
+
+    gen_seq = x_pred_list
+    
+    to_plot = []
+    nrow = min(opt.batch_size, 10)
+    for i in range(nrow):
+        row = []
+        for t in range(opt.n_past+opt.n_future):
+            row.append(gen_seq[t][i]) 
+        to_plot.append(row)
+    fname = '%s/gen/[%s]rec_%d.png' % (opt.log_dir, prefix, epoch) 
+    utils.save_tensors_image(fname, to_plot)
+    
+
+# Training loop
+def pre_training_loop():
+    for epoch in tqdm(range(opt.pre_niter), desc='[PRE]EPOCH'):
+        encoder_c.train()
+        encoder_p.train()
+        decoder.train()
+        discriminator.train()
+        
+        epoch_mse = 0
+        epoch_loss_G = 0
+        epoch_loss_content = 0
+        epoch_loss_D = 0
+        epoch_acc = 0
+        
+        for i in tqdm(range(opt.epoch_size), desc='[PRE]BATCH'):
+            x = next(training_batch_generator)
+            loss_D, acc = train_discriminator(x)
+            mse, loss_content = train_deterministic(x)
+            loss_G = train_swap(x)
+            
+            epoch_loss_D += loss_D
+            epoch_acc += acc
+            epoch_mse += mse
+            epoch_loss_G += loss_G
+            epoch_loss_content += loss_content
+            
+        print('[PRE][%02d] mse loss: %.5f | loss_G: %.5f | loss_C: %.5f | loss_D: %.5f | Acc: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_loss_G/opt.epoch_size, epoch_loss_content/opt.epoch_size, epoch_loss_D/opt.epoch_size, epoch_acc/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+#         print('[PRE][%02d] mse: %.5f | loss_C: %.5f (%d)' % (epoch, epoch_mse/opt.epoch_size, epoch_loss_content/opt.epoch_size, epoch*opt.epoch_size*opt.batch_size))
+        
+        
+        if (epoch+1) % 5 == 0:
+            """
+            Make visualization
+            """
+            encoder_c.eval()
+            encoder_p.eval()
+            decoder.eval()
+
+            x = next(testing_batch_generator)
+            with torch.no_grad():
+                plot_rec(x, epoch, 'PRE')
+            torch.save({
+                'encoder_p': encoder_p,
+                'encoder_c': encoder_c,
+                'decoder': decoder,
+                'discriminator': discriminator,
+                'opt': opt
+            }, '%s/pre_model.pth' % opt.log_dir)
+            
+pre_training_loop()

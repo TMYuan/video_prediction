@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import models.dcgan_64 as dcgan_64
 from torch.autograd import Variable
 
 class discriminator(nn.Module):
@@ -18,7 +19,28 @@ class discriminator(nn.Module):
     def forward(self, input):
         output = self.main(torch.cat(input, 1).view(-1, self.pose_dim*2))
         return output
-    
+
+class content_disc(nn.Module):
+    def __init__(self, pose_dim, nf=512):
+        super(content_disc, self).__init__()
+        self.pose_dim = pose_dim
+        self.cnn = dcgan_64.encoder(pose_dim, 1, conditional=False)
+        self.fc = nn.Sequential(
+            nn.Linear(pose_dim*2, nf),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(nf, nf//2),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Linear(nf//2, 1),
+            nn.Sigmoid()
+        )
+    def forward(self, x1, x2):
+        f1, _ = self.cnn(x1)
+        f2, _ = self.cnn(x2)
+        # use f2 as reference
+        f2 = f2.detach()
+        output = self.fc(torch.cat([f1, f2], 1).view(-1, self.pose_dim*2))
+        return output
+
 class lstm(nn.Module):
     def __init__(self, input_size, output_size, hidden_size, n_layers, batch_size):
         super(lstm, self).__init__()
